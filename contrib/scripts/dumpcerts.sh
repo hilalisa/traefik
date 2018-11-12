@@ -42,6 +42,18 @@ set -o nounset
 
 USAGE="$(basename "$0") <path to acme> <destination cert directory>"
 
+# Platform variations
+case "$(uname)" in
+	'Linux')
+		# On Linux, -d should always work. --decode does not work with Alpine's busybox-binary
+		CMD_DECODE_BASE64="base64 -d"
+		;;
+	*)
+		# Max OS-X supports --decode and -D, but --decode may be supported by other platforms as well.
+		CMD_DECODE_BASE64="base64 --decode"
+		;;
+esac
+
 # Allow us to exit on a missing jq binary
 exit_jq() {
 	echo "
@@ -92,7 +104,7 @@ fi
 
 jq=$(command -v jq) || exit_jq
 
-priv=$(${jq} -e -r '.PrivateKey' "${acmefile}") || bad_acme
+priv=$(${jq} -e -r '.Account.PrivateKey' "${acmefile}") || bad_acme
 
 if [ ! -n "${priv}" ]; then
 	echo "
@@ -143,16 +155,16 @@ echo -e "-----BEGIN RSA PRIVATE KEY-----\n${priv}\n-----END RSA PRIVATE KEY-----
    | openssl rsa -inform pem -out "${pdir}/letsencrypt.key"
 
 # Process the certificates for each of the domains in acme.json
-for domain in $(jq -r '.DomainsCertificate.Certs[].Certificate.Domain' ${acmefile}); do
+for domain in $(jq -r '.Certificates[].Domain.Main' ${acmefile}); do
 	# Traefik stores a cert bundle for each domain.  Within this cert
 	# bundle there is both proper the certificate and the Let's Encrypt CA
 	echo "Extracting cert bundle for ${domain}"
-	cert=$(jq -e -r --arg domain "$domain" '.DomainsCertificate.Certs[].Certificate |
-         	select (.Domain == $domain )| .Certificate' ${acmefile}) || bad_acme
-	echo "${cert}" | base64 --decode > "${cdir}/${domain}.crt"
+	cert=$(jq -e -r --arg domain "$domain" '.Certificates[] |
+         	select (.Domain.Main == $domain )| .Certificate' ${acmefile}) || bad_acme
+	echo "${cert}" | ${CMD_DECODE_BASE64} > "${cdir}/${domain}.crt"
 
 	echo "Extracting private key for ${domain}"
-	key=$(jq -e -r --arg domain "$domain" '.DomainsCertificate.Certs[].Certificate |
-		select (.Domain == $domain )| .PrivateKey' ${acmefile}) || bad_acme
-	echo "${key}" | base64 --decode > "${pdir}/${domain}.key"
+	key=$(jq -e -r --arg domain "$domain" '.Certificates[] |
+		select (.Domain.Main == $domain )| .Key' ${acmefile}) || bad_acme
+	echo "${key}" | ${CMD_DECODE_BASE64} > "${pdir}/${domain}.key"
 done

@@ -18,28 +18,36 @@ import (
 // Log rotation integration test suite
 type LogRotationSuite struct{ BaseSuite }
 
+func (s *LogRotationSuite) SetUpSuite(c *check.C) {
+	s.createComposeProject(c, "access_log")
+	s.composeProject.Start(c)
+
+	s.composeProject.Container(c, "server1")
+}
+
 func (s *LogRotationSuite) TestAccessLogRotation(c *check.C) {
 	// Start Traefik
 	cmd, display := s.traefikCmd(withConfigFile("fixtures/access_log_config.toml"))
 	defer display(c)
+	defer displayTraefikLogFile(c, traefikTestLogFile)
+
 	err := cmd.Start()
 	c.Assert(err, checker.IsNil)
 	defer cmd.Process.Kill()
+
 	defer os.Remove(traefikTestAccessLogFile)
-	defer os.Remove(traefikTestLogFile)
 
 	// Verify Traefik started ok
 	verifyEmptyErrorLog(c, "traefik.log")
 
-	// Start test servers
-	ts1 := startAccessLogServer(8081)
-	defer ts1.Close()
-
-	// Allow time to startup
-	time.Sleep(1 * time.Second)
+	waitForTraefik(c, "server1")
 
 	// Make some requests
-	err = try.GetRequest("http://127.0.0.1:8000/test1", 500*time.Millisecond)
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:8000/", nil)
+	c.Assert(err, checker.IsNil)
+	req.Host = "frontend1.docker.local"
+
+	err = try.Request(req, 500*time.Millisecond, try.StatusCodeIs(http.StatusOK), try.HasBody())
 	c.Assert(err, checker.IsNil)
 
 	// Rename access log
@@ -51,16 +59,25 @@ func (s *LogRotationSuite) TestAccessLogRotation(c *check.C) {
 	c.Assert(err, checker.IsNil)
 
 	// continue issuing requests
-	_, err = http.Get("http://127.0.0.1:8000/test1")
+	err = try.Request(req, 500*time.Millisecond, try.StatusCodeIs(http.StatusOK), try.HasBody())
 	c.Assert(err, checker.IsNil)
-	_, err = http.Get("http://127.0.0.1:8000/test1")
+	err = try.Request(req, 500*time.Millisecond, try.StatusCodeIs(http.StatusOK), try.HasBody())
 	c.Assert(err, checker.IsNil)
 
 	// Verify access.log.rotated output as expected
+	logAccessLogFile(c, traefikTestAccessLogFile+".rotated")
 	lineCount := verifyLogLines(c, traefikTestAccessLogFile+".rotated", 0, true)
 	c.Assert(lineCount, checker.GreaterOrEqualThan, 1)
 
+	// make sure that the access log file is at least created before we do assertions on it
+	err = try.Do(1*time.Second, func() error {
+		_, err := os.Stat(traefikTestAccessLogFile)
+		return err
+	})
+	c.Assert(err, checker.IsNil, check.Commentf("access log file was not created in time"))
+
 	// Verify access.log output as expected
+	logAccessLogFile(c, traefikTestAccessLogFile)
 	lineCount = verifyLogLines(c, traefikTestAccessLogFile, lineCount, true)
 	c.Assert(lineCount, checker.Equals, 3)
 
@@ -71,15 +88,15 @@ func (s *LogRotationSuite) TestTraefikLogRotation(c *check.C) {
 	// Start Traefik
 	cmd, display := s.traefikCmd(withConfigFile("fixtures/traefik_log_config.toml"))
 	defer display(c)
+	defer displayTraefikLogFile(c, traefikTestLogFile)
+
 	err := cmd.Start()
 	c.Assert(err, checker.IsNil)
 	defer cmd.Process.Kill()
-	defer os.Remove(traefikTestAccessLogFile)
-	defer os.Remove(traefikTestLogFile)
 
-	// Ensure Traefik has started
-	err = try.GetRequest("http://127.0.0.1:8000/test1", 500*time.Millisecond)
-	c.Assert(err, checker.IsNil)
+	defer os.Remove(traefikTestAccessLogFile)
+
+	waitForTraefik(c, "server1")
 
 	// Rename traefik log
 	err = os.Rename(traefikTestLogFile, traefikTestLogFile+".rotated")
@@ -106,9 +123,15 @@ func (s *LogRotationSuite) TestTraefikLogRotation(c *check.C) {
 	// If more log entries are output on startup
 	c.Assert(lineCount, checker.GreaterOrEqualThan, 5)
 
-	//Verify traefik.log output as expected
+	// Verify traefik.log output as expected
 	lineCount = verifyLogLines(c, traefikTestLogFile, lineCount, false)
 	c.Assert(lineCount, checker.GreaterOrEqualThan, 7)
+}
+
+func logAccessLogFile(c *check.C, fileName string) {
+	output, err := ioutil.ReadFile(fileName)
+	c.Assert(err, checker.IsNil)
+	c.Logf("Contents of file %s\n%s", fileName, string(output))
 }
 
 func verifyEmptyErrorLog(c *check.C, name string) {
@@ -130,7 +153,6 @@ func verifyLogLines(c *check.C, fileName string, countInit int, accessLog bool) 
 	count := countInit
 	for rotatedLog.Scan() {
 		line := rotatedLog.Text()
-		c.Log(line)
 		if accessLog {
 			if len(line) > 0 {
 				CheckAccessLogFormat(c, line, count)

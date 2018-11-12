@@ -1,13 +1,13 @@
-# Etcd Backend
+# Etcd Provider
 
-Træfik can be configured to use Etcd as a backend configuration.
+Traefik can be configured to use Etcd as a provider.
 
 ```toml
 ################################################################
-# Etcd configuration backend
+# Etcd Provider
 ################################################################
 
-# Enable Etcd configuration backend.
+# Enable Etcd Provider.
 [etcd]
 
 # Etcd server endpoint.
@@ -53,9 +53,9 @@ prefix = "/traefik"
 #    ca = "/etc/ssl/ca.crt"
 #    cert = "/etc/ssl/etcd.crt"
 #    key = "/etc/ssl/etcd.key"
-#    insecureskipverify = true
+#    insecureSkipVerify = true
 ```
 
-To enable constraints see [backend-specific constraints section](/configuration/commons/#backend-specific).
+To enable constraints see [provider-specific constraints section](/configuration/commons/#provider-specific).
 
 Please refer to the [Key Value storage structure](/user-guide/kv-config/#key-value-storage-structure) section to get documentation on Traefik KV structure.

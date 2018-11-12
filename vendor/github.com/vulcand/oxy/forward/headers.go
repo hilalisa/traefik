@@ -1,11 +1,13 @@
 package forward
 
+// Headers
 const (
 	XForwardedProto        = "X-Forwarded-Proto"
 	XForwardedFor          = "X-Forwarded-For"
 	XForwardedHost         = "X-Forwarded-Host"
 	XForwardedPort         = "X-Forwarded-Port"
 	XForwardedServer       = "X-Forwarded-Server"
+	XRealIp                = "X-Real-Ip"
 	Connection             = "Connection"
 	KeepAlive              = "Keep-Alive"
 	ProxyAuthenticate      = "Proxy-Authenticate"
@@ -15,14 +17,13 @@ const (
 	TransferEncoding       = "Transfer-Encoding"
 	Upgrade                = "Upgrade"
 	ContentLength          = "Content-Length"
-	ContentType            = "Content-Type"
 	SecWebsocketKey        = "Sec-Websocket-Key"
 	SecWebsocketVersion    = "Sec-Websocket-Version"
 	SecWebsocketExtensions = "Sec-Websocket-Extensions"
 	SecWebsocketAccept     = "Sec-Websocket-Accept"
 )
 
-// Hop-by-hop headers. These are removed when sent to the backend.
+// HopHeaders Hop-by-hop headers. These are removed when sent to the backend.
 // http://www.w3.org/Protocols/rfc2616/rfc2616-sec13.html
 // Copied from reverseproxy.go, too bad
 var HopHeaders = []string{
@@ -36,6 +37,7 @@ var HopHeaders = []string{
 	Upgrade,
 }
 
+// WebsocketDialHeaders Websocket dial headers
 var WebsocketDialHeaders = []string{
 	Upgrade,
 	Connection,
@@ -45,8 +47,20 @@ var WebsocketDialHeaders = []string{
 	SecWebsocketAccept,
 }
 
+// WebsocketUpgradeHeaders Websocket upgrade headers
 var WebsocketUpgradeHeaders = []string{
 	Upgrade,
 	Connection,
 	SecWebsocketAccept,
+	SecWebsocketExtensions,
+}
+
+// XHeaders X-* headers
+var XHeaders = []string{
+	XForwardedProto,
+	XForwardedFor,
+	XForwardedHost,
+	XForwardedPort,
+	XForwardedServer,
+	XRealIp,
 }

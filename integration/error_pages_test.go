@@ -39,7 +39,7 @@ func (s *ErrorPagesSuite) TestSimpleConfiguration(c *check.C) {
 	c.Assert(err, checker.IsNil)
 	defer cmd.Process.Kill()
 
-	frontendReq, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:80", nil)
+	frontendReq, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:8080", nil)
 	c.Assert(err, checker.IsNil)
 	frontendReq.Host = "test.local"
 
@@ -49,7 +49,7 @@ func (s *ErrorPagesSuite) TestSimpleConfiguration(c *check.C) {
 
 func (s *ErrorPagesSuite) TestErrorPage(c *check.C) {
 
-	//error.toml contains a mis-configuration of the backend host
+	// error.toml contains a mis-configuration of the backend host
 	file := s.adaptFile(c, "fixtures/error_pages/error.toml", struct {
 		Server1 string
 		Server2 string
@@ -62,7 +62,7 @@ func (s *ErrorPagesSuite) TestErrorPage(c *check.C) {
 	c.Assert(err, checker.IsNil)
 	defer cmd.Process.Kill()
 
-	frontendReq, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:80", nil)
+	frontendReq, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:8080", nil)
 	c.Assert(err, checker.IsNil)
 	frontendReq.Host = "test.local"
 

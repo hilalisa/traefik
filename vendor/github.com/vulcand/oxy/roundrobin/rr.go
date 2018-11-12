@@ -1,4 +1,4 @@
-// package roundrobin implements dynamic weighted round robin load balancer http handler
+// Package roundrobin implements dynamic weighted round robin load balancer http handler
 package roundrobin
 
 import (
@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"sync"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/vulcand/oxy/utils"
 )
 
@@ -29,31 +30,47 @@ func ErrorHandler(h utils.ErrorHandler) LBOption {
 	}
 }
 
-func EnableStickySession(ss *StickySession) LBOption {
+// EnableStickySession enable sticky session
+func EnableStickySession(stickySession *StickySession) LBOption {
 	return func(s *RoundRobin) error {
-		s.ss = ss
+		s.stickySession = stickySession
 		return nil
 	}
 }
 
+// RoundRobinRequestRewriteListener is a functional argument that sets error handler of the server
+func RoundRobinRequestRewriteListener(rrl RequestRewriteListener) LBOption {
+	return func(s *RoundRobin) error {
+		s.requestRewriteListener = rrl
+		return nil
+	}
+}
+
+// RoundRobin implements dynamic weighted round robin load balancer http handler
 type RoundRobin struct {
 	mutex      *sync.Mutex
 	next       http.Handler
 	errHandler utils.ErrorHandler
 	// Current index (starts from -1)
-	index         int
-	servers       []*server
-	currentWeight int
-	ss            *StickySession
+	index                  int
+	servers                []*server
+	currentWeight          int
+	stickySession          *StickySession
+	requestRewriteListener RequestRewriteListener
+
+	log *log.Logger
 }
 
+// New created a new RoundRobin
 func New(next http.Handler, opts ...LBOption) (*RoundRobin, error) {
 	rr := &RoundRobin{
-		next:    next,
-		index:   -1,
-		mutex:   &sync.Mutex{},
-		servers: []*server{},
-		ss:      nil,
+		next:          next,
+		index:         -1,
+		mutex:         &sync.Mutex{},
+		servers:       []*server{},
+		stickySession: nil,
+
+		log: log.StandardLogger(),
 	}
 	for _, o := range opts {
 		if err := o(rr); err != nil {
@@ -66,24 +83,40 @@ func New(next http.Handler, opts ...LBOption) (*RoundRobin, error) {
 	return rr, nil
 }
 
+// RoundRobinLogger defines the logger the round robin load balancer will use.
+//
+// It defaults to logrus.StandardLogger(), the global logger used by logrus.
+func RoundRobinLogger(l *log.Logger) LBOption {
+	return func(r *RoundRobin) error {
+		r.log = l
+		return nil
+	}
+}
+
+// Next returns the next handler
 func (r *RoundRobin) Next() http.Handler {
 	return r.next
 }
 
 func (r *RoundRobin) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if r.log.Level >= log.DebugLevel {
+		logEntry := r.log.WithField("Request", utils.DumpHttpRequest(req))
+		logEntry.Debug("vulcand/oxy/roundrobin/rr: begin ServeHttp on request")
+		defer logEntry.Debug("vulcand/oxy/roundrobin/rr: completed ServeHttp on request")
+	}
+
 	// make shallow copy of request before chaning anything to avoid side effects
 	newReq := *req
 	stuck := false
-	if r.ss != nil {
-		cookie_url, present, err := r.ss.GetBackend(&newReq, r.Servers())
+	if r.stickySession != nil {
+		cookieURL, present, err := r.stickySession.GetBackend(&newReq, r.Servers())
 
 		if err != nil {
-			r.errHandler.ServeHTTP(w, req, err)
-			return
+			log.Warnf("vulcand/oxy/roundrobin/rr: error using server from cookie: %v", err)
 		}
 
 		if present {
-			newReq.URL = cookie_url
+			newReq.URL = cookieURL
 			stuck = true
 		}
 	}
@@ -95,14 +128,26 @@ func (r *RoundRobin) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		if r.ss != nil {
-			r.ss.StickBackend(url, &w)
+		if r.stickySession != nil {
+			r.stickySession.StickBackend(url, &w)
 		}
 		newReq.URL = url
 	}
+
+	if r.log.Level >= log.DebugLevel {
+		// log which backend URL we're sending this request to
+		r.log.WithFields(log.Fields{"Request": utils.DumpHttpRequest(req), "ForwardURL": newReq.URL}).Debugf("vulcand/oxy/roundrobin/rr: Forwarding this request to URL")
+	}
+
+	// Emit event to a listener if one exists
+	if r.requestRewriteListener != nil {
+		r.requestRewriteListener(req, &newReq)
+	}
+
 	r.next.ServeHTTP(w, &newReq)
 }
 
+// NextServer gets the next server
 func (r *RoundRobin) NextServer() (*url.URL, error) {
 	srv, err := r.nextServer()
 	if err != nil {
@@ -144,10 +189,9 @@ func (r *RoundRobin) nextServer() (*server, error) {
 			return srv, nil
 		}
 	}
-	// We did full circle and found no available servers
-	return nil, fmt.Errorf("no available servers")
 }
 
+// RemoveServer remove a server
 func (r *RoundRobin) RemoveServer(u *url.URL) error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
@@ -161,43 +205,45 @@ func (r *RoundRobin) RemoveServer(u *url.URL) error {
 	return nil
 }
 
-func (rr *RoundRobin) Servers() []*url.URL {
-	rr.mutex.Lock()
-	defer rr.mutex.Unlock()
+// Servers gets servers URL
+func (r *RoundRobin) Servers() []*url.URL {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
 
-	out := make([]*url.URL, len(rr.servers))
-	for i, srv := range rr.servers {
+	out := make([]*url.URL, len(r.servers))
+	for i, srv := range r.servers {
 		out[i] = srv.url
 	}
 	return out
 }
 
-func (rr *RoundRobin) ServerWeight(u *url.URL) (int, bool) {
-	rr.mutex.Lock()
-	defer rr.mutex.Unlock()
+// ServerWeight gets the server weight
+func (r *RoundRobin) ServerWeight(u *url.URL) (int, bool) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
 
-	if s, _ := rr.findServerByURL(u); s != nil {
+	if s, _ := r.findServerByURL(u); s != nil {
 		return s.weight, true
 	}
 	return -1, false
 }
 
-// In case if server is already present in the load balancer, returns error
-func (rr *RoundRobin) UpsertServer(u *url.URL, options ...ServerOption) error {
-	rr.mutex.Lock()
-	defer rr.mutex.Unlock()
+// UpsertServer In case if server is already present in the load balancer, returns error
+func (r *RoundRobin) UpsertServer(u *url.URL, options ...ServerOption) error {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
 
 	if u == nil {
 		return fmt.Errorf("server URL can't be nil")
 	}
 
-	if s, _ := rr.findServerByURL(u); s != nil {
+	if s, _ := r.findServerByURL(u); s != nil {
 		for _, o := range options {
 			if err := o(s); err != nil {
 				return err
 			}
 		}
-		rr.resetState()
+		r.resetState()
 		return nil
 	}
 
@@ -212,8 +258,8 @@ func (rr *RoundRobin) UpsertServer(u *url.URL, options ...ServerOption) error {
 		srv.weight = defaultWeight
 	}
 
-	rr.servers = append(rr.servers, srv)
-	rr.resetState()
+	r.servers = append(r.servers, srv)
+	r.resetState()
 	return nil
 }
 
@@ -238,9 +284,9 @@ func (r *RoundRobin) findServerByURL(u *url.URL) (*server, int) {
 	return nil, -1
 }
 
-func (rr *RoundRobin) maxWeight() int {
+func (r *RoundRobin) maxWeight() int {
 	max := -1
-	for _, s := range rr.servers {
+	for _, s := range r.servers {
 		if s.weight > max {
 			max = s.weight
 		}
@@ -248,9 +294,9 @@ func (rr *RoundRobin) maxWeight() int {
 	return max
 }
 
-func (rr *RoundRobin) weightGcd() int {
+func (r *RoundRobin) weightGcd() int {
 	divisor := -1
-	for _, s := range rr.servers {
+	for _, s := range r.servers {
 		if divisor == -1 {
 			divisor = s.weight
 		} else {
@@ -280,7 +326,16 @@ type server struct {
 	weight int
 }
 
-const defaultWeight = 1
+var defaultWeight = 1
+
+// SetDefaultWeight sets the default server weight
+func SetDefaultWeight(weight int) error {
+	if weight < 0 {
+		return fmt.Errorf("default weight should be >= 0")
+	}
+	defaultWeight = weight
+	return nil
+}
 
 func sameURL(a, b *url.URL) bool {
 	return a.Path == b.Path && a.Host == b.Host && a.Scheme == b.Scheme

@@ -2,84 +2,66 @@ package middlewares
 
 import (
 	"fmt"
-	"net"
 	"net/http"
 
+	"github.com/containous/traefik/ip"
 	"github.com/containous/traefik/log"
+	"github.com/containous/traefik/middlewares/tracing"
 	"github.com/pkg/errors"
 	"github.com/urfave/negroni"
 )
 
-// IPWhitelister is a middleware that provides Checks of the Requesting IP against a set of Whitelists
-type IPWhitelister struct {
-	handler    negroni.Handler
-	whitelists []*net.IPNet
+// IPWhiteLister is a middleware that provides Checks of the Requesting IP against a set of Whitelists
+type IPWhiteLister struct {
+	handler     negroni.Handler
+	whiteLister *ip.Checker
+	strategy    ip.Strategy
 }
 
-// NewIPWhitelister builds a new IPWhitelister given a list of CIDR-Strings to whitelist
-func NewIPWhitelister(whitelistStrings []string) (*IPWhitelister, error) {
-
-	if len(whitelistStrings) == 0 {
-		return nil, errors.New("no whitelists provided")
+// NewIPWhiteLister builds a new IPWhiteLister given a list of CIDR-Strings to whitelist
+func NewIPWhiteLister(whiteList []string, strategy ip.Strategy) (*IPWhiteLister, error) {
+	if len(whiteList) == 0 {
+		return nil, errors.New("no white list provided")
 	}
 
-	whitelister := IPWhitelister{}
-
-	for _, whitelistString := range whitelistStrings {
-		_, whitelist, err := net.ParseCIDR(whitelistString)
-		if err != nil {
-			return nil, fmt.Errorf("parsing CIDR whitelist %s: %v", whitelist, err)
-		}
-		whitelister.whitelists = append(whitelister.whitelists, whitelist)
-	}
-
-	whitelister.handler = negroni.HandlerFunc(whitelister.handle)
-	log.Debugf("configured %u IP whitelists: %s", len(whitelister.whitelists), whitelister.whitelists)
-
-	return &whitelister, nil
-}
-
-func (whitelister *IPWhitelister) handle(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
-	remoteIP, err := ipFromRemoteAddr(r.RemoteAddr)
+	checker, err := ip.NewChecker(whiteList)
 	if err != nil {
-		log.Warnf("unable to parse remote-address from header: %s - rejecting", r.RemoteAddr)
+		return nil, fmt.Errorf("parsing CIDR whitelist %s: %v", whiteList, err)
+	}
+
+	whiteLister := IPWhiteLister{
+		strategy:    strategy,
+		whiteLister: checker,
+	}
+
+	whiteLister.handler = negroni.HandlerFunc(whiteLister.handle)
+	log.Debugf("configured IP white list: %s", whiteList)
+
+	return &whiteLister, nil
+}
+
+func (wl *IPWhiteLister) handle(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+	err := wl.whiteLister.IsAuthorized(wl.strategy.GetIP(r))
+	if err != nil {
+		tracing.SetErrorAndDebugLog(r, "request %+v - rejecting: %v", r, err)
 		reject(w)
 		return
 	}
+	log.Debugf("Accept %s: %+v", wl.strategy.GetIP(r), r)
+	tracing.SetErrorAndDebugLog(r, "request %+v matched white list %v - passing", r, wl.whiteLister)
+	next.ServeHTTP(w, r)
+}
 
-	for _, whitelist := range whitelister.whitelists {
-		if whitelist.Contains(*remoteIP) {
-			log.Debugf("source-IP %s matched whitelist %s - passing", remoteIP, whitelist)
-			next.ServeHTTP(w, r)
-			return
-		}
-	}
-
-	log.Debugf("source-IP %s matched none of the whitelists - rejecting", remoteIP)
-	reject(w)
+func (wl *IPWhiteLister) ServeHTTP(rw http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+	wl.handler.ServeHTTP(rw, r, next)
 }
 
 func reject(w http.ResponseWriter) {
 	statusCode := http.StatusForbidden
 
 	w.WriteHeader(statusCode)
-	w.Write([]byte(http.StatusText(statusCode)))
-}
-
-func ipFromRemoteAddr(addr string) (*net.IP, error) {
-	ip, _, err := net.SplitHostPort(addr)
+	_, err := w.Write([]byte(http.StatusText(statusCode)))
 	if err != nil {
-		return nil, fmt.Errorf("can't extract IP/Port from address %s: %s", addr, err)
+		log.Error(err)
 	}
-
-	userIP := net.ParseIP(ip)
-	if userIP == nil {
-		return nil, fmt.Errorf("can't parse IP from address %s", ip)
-	}
-
-	return &userIP, nil
-}
-
-func (whitelister *IPWhitelister) ServeHTTP(rw http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
-	whitelister.handler.ServeHTTP(rw, r, next)
 }

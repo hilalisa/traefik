@@ -12,68 +12,90 @@ import (
 
 	"github.com/containous/traefik/log"
 	"github.com/containous/traefik/safe"
+	"github.com/go-kit/kit/metrics"
 	"github.com/vulcand/oxy/roundrobin"
 )
 
 var singleton *HealthCheck
 var once sync.Once
 
-// GetHealthCheck returns the health check which is guaranteed to be a singleton.
-func GetHealthCheck() *HealthCheck {
-	once.Do(func() {
-		singleton = newHealthCheck()
-	})
-	return singleton
+// BalancerHandler includes functionality for load-balancing management.
+type BalancerHandler interface {
+	ServeHTTP(w http.ResponseWriter, req *http.Request)
+	Servers() []*url.URL
+	RemoveServer(u *url.URL) error
+	UpsertServer(u *url.URL, options ...roundrobin.ServerOption) error
+}
+
+// metricsRegistry is a local interface in the health check package, exposing only the required metrics
+// necessary for the health check package. This makes it easier for the tests.
+type metricsRegistry interface {
+	BackendServerUpGauge() metrics.Gauge
 }
 
 // Options are the public health check options.
 type Options struct {
-	Path     string
-	Port     int
-	Interval time.Duration
-	LB       LoadBalancer
+	Headers   map[string]string
+	Hostname  string
+	Scheme    string
+	Path      string
+	Port      int
+	Transport http.RoundTripper
+	Interval  time.Duration
+	Timeout   time.Duration
+	LB        BalancerHandler
 }
 
 func (opt Options) String() string {
-	return fmt.Sprintf("[Path: %s Port: %d Interval: %s]", opt.Path, opt.Port, opt.Interval)
+	return fmt.Sprintf("[Hostname: %s Headers: %v Path: %s Port: %d Interval: %s Timeout: %s]", opt.Hostname, opt.Headers, opt.Path, opt.Port, opt.Interval, opt.Timeout)
 }
 
-// BackendHealthCheck HealthCheck configuration for a backend
-type BackendHealthCheck struct {
+// BackendConfig HealthCheck configuration for a backend
+type BackendConfig struct {
 	Options
+	name           string
 	disabledURLs   []*url.URL
 	requestTimeout time.Duration
 }
 
-//HealthCheck struct
+func (b *BackendConfig) newRequest(serverURL *url.URL) (*http.Request, error) {
+	u := &url.URL{}
+	*u = *serverURL
+
+	if len(b.Scheme) > 0 {
+		u.Scheme = b.Scheme
+	}
+
+	if b.Port != 0 {
+		u.Host = net.JoinHostPort(u.Hostname(), strconv.Itoa(b.Port))
+	}
+
+	u.Path += b.Path
+
+	return http.NewRequest(http.MethodGet, u.String(), http.NoBody)
+}
+
+// this function adds additional http headers and hostname to http.request
+func (b *BackendConfig) addHeadersAndHost(req *http.Request) *http.Request {
+	if b.Options.Hostname != "" {
+		req.Host = b.Options.Hostname
+	}
+
+	for k, v := range b.Options.Headers {
+		req.Header.Set(k, v)
+	}
+	return req
+}
+
+// HealthCheck struct
 type HealthCheck struct {
-	Backends map[string]*BackendHealthCheck
+	Backends map[string]*BackendConfig
+	metrics  metricsRegistry
 	cancel   context.CancelFunc
 }
 
-// LoadBalancer includes functionality for load-balancing management.
-type LoadBalancer interface {
-	RemoveServer(u *url.URL) error
-	UpsertServer(u *url.URL, options ...roundrobin.ServerOption) error
-	Servers() []*url.URL
-}
-
-func newHealthCheck() *HealthCheck {
-	return &HealthCheck{
-		Backends: make(map[string]*BackendHealthCheck),
-	}
-}
-
-// NewBackendHealthCheck Instantiate a new BackendHealthCheck
-func NewBackendHealthCheck(options Options) *BackendHealthCheck {
-	return &BackendHealthCheck{
-		Options:        options,
-		requestTimeout: 5 * time.Second,
-	}
-}
-
-//SetBackendsConfiguration set backends configuration
-func (hc *HealthCheck) SetBackendsConfiguration(parentCtx context.Context, backends map[string]*BackendHealthCheck) {
+// SetBackendsConfiguration set backends configuration
+func (hc *HealthCheck) SetBackendsConfiguration(parentCtx context.Context, backends map[string]*BackendConfig) {
 	hc.Backends = backends
 	if hc.cancel != nil {
 		hc.cancel()
@@ -81,83 +103,114 @@ func (hc *HealthCheck) SetBackendsConfiguration(parentCtx context.Context, backe
 	ctx, cancel := context.WithCancel(parentCtx)
 	hc.cancel = cancel
 
-	for backendID, backend := range hc.Backends {
-		currentBackendID := backendID
+	for _, backend := range backends {
 		currentBackend := backend
 		safe.Go(func() {
-			hc.execute(ctx, currentBackendID, currentBackend)
+			hc.execute(ctx, currentBackend)
 		})
 	}
 }
 
-func (hc *HealthCheck) execute(ctx context.Context, backendID string, backend *BackendHealthCheck) {
-	log.Debugf("Initial healthcheck for currentBackend %s ", backendID)
-	checkBackend(backend)
+func (hc *HealthCheck) execute(ctx context.Context, backend *BackendConfig) {
+	log.Debugf("Initial health check for backend: %q", backend.name)
+	hc.checkBackend(backend)
 	ticker := time.NewTicker(backend.Interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			log.Debug("Stopping all current Healthcheck goroutines")
+			log.Debugf("Stopping current health check goroutines of backend: %s", backend.name)
 			return
 		case <-ticker.C:
-			log.Debugf("Refreshing healthcheck for currentBackend %s ", backendID)
-			checkBackend(backend)
+			log.Debugf("Refreshing health check for backend: %s", backend.name)
+			hc.checkBackend(backend)
 		}
 	}
 }
 
-func checkBackend(currentBackend *BackendHealthCheck) {
-	enabledURLs := currentBackend.LB.Servers()
+func (hc *HealthCheck) checkBackend(backend *BackendConfig) {
+	enabledURLs := backend.LB.Servers()
 	var newDisabledURLs []*url.URL
-	for _, url := range currentBackend.disabledURLs {
-		if checkHealth(url, currentBackend) {
-			log.Debugf("HealthCheck is up [%s]: Upsert in server list", url.String())
-			currentBackend.LB.UpsertServer(url, roundrobin.Weight(1))
+	for _, disableURL := range backend.disabledURLs {
+		serverUpMetricValue := float64(0)
+		if err := checkHealth(disableURL, backend); err == nil {
+			log.Warnf("Health check up: Returning to server list. Backend: %q URL: %q", backend.name, disableURL.String())
+			if err := backend.LB.UpsertServer(disableURL, roundrobin.Weight(1)); err != nil {
+				log.Error(err)
+			}
+			serverUpMetricValue = 1
 		} else {
-			log.Warnf("HealthCheck is still failing [%s]", url.String())
-			newDisabledURLs = append(newDisabledURLs, url)
+			log.Warnf("Health check still failing. Backend: %q URL: %q Reason: %s", backend.name, disableURL.String(), err)
+			newDisabledURLs = append(newDisabledURLs, disableURL)
 		}
+		labelValues := []string{"backend", backend.name, "url", disableURL.String()}
+		hc.metrics.BackendServerUpGauge().With(labelValues...).Set(serverUpMetricValue)
 	}
-	currentBackend.disabledURLs = newDisabledURLs
+	backend.disabledURLs = newDisabledURLs
 
-	for _, url := range enabledURLs {
-		if !checkHealth(url, currentBackend) {
-			log.Warnf("HealthCheck has failed [%s]: Remove from server list", url.String())
-			currentBackend.LB.RemoveServer(url)
-			currentBackend.disabledURLs = append(currentBackend.disabledURLs, url)
+	for _, enableURL := range enabledURLs {
+		serverUpMetricValue := float64(1)
+		if err := checkHealth(enableURL, backend); err != nil {
+			log.Warnf("Health check failed: Remove from server list. Backend: %q URL: %q Reason: %s", backend.name, enableURL.String(), err)
+			if err := backend.LB.RemoveServer(enableURL); err != nil {
+				log.Error(err)
+			}
+			backend.disabledURLs = append(backend.disabledURLs, enableURL)
+			serverUpMetricValue = 0
 		}
+		labelValues := []string{"backend", backend.name, "url", enableURL.String()}
+		hc.metrics.BackendServerUpGauge().With(labelValues...).Set(serverUpMetricValue)
 	}
 }
 
-func (backend *BackendHealthCheck) newRequest(serverURL *url.URL) (*http.Request, error) {
-	if backend.Port == 0 {
-		return http.NewRequest("GET", serverURL.String()+backend.Path, nil)
-	}
-
-	// copy the url and add the port to the host
-	u := &url.URL{}
-	*u = *serverURL
-	u.Host = net.JoinHostPort(u.Hostname(), strconv.Itoa(backend.Port))
-	u.Path = u.Path + backend.Path
-
-	return http.NewRequest("GET", u.String(), nil)
+// GetHealthCheck returns the health check which is guaranteed to be a singleton.
+func GetHealthCheck(metrics metricsRegistry) *HealthCheck {
+	once.Do(func() {
+		singleton = newHealthCheck(metrics)
+	})
+	return singleton
 }
 
-func checkHealth(serverURL *url.URL, backend *BackendHealthCheck) bool {
-	client := http.Client{
-		Timeout: backend.requestTimeout,
+func newHealthCheck(metrics metricsRegistry) *HealthCheck {
+	return &HealthCheck{
+		Backends: make(map[string]*BackendConfig),
+		metrics:  metrics,
 	}
+}
+
+// NewBackendConfig Instantiate a new BackendConfig
+func NewBackendConfig(options Options, backendName string) *BackendConfig {
+	return &BackendConfig{
+		Options: options,
+		name:    backendName,
+	}
+}
+
+// checkHealth returns a nil error in case it was successful and otherwise
+// a non-nil error with a meaningful description why the health check failed.
+func checkHealth(serverURL *url.URL, backend *BackendConfig) error {
 	req, err := backend.newRequest(serverURL)
 	if err != nil {
-		log.Errorf("Failed to create HTTP request [%s] for healthcheck: %s", serverURL, err)
-		return false
+		return fmt.Errorf("failed to create HTTP request: %s", err)
+	}
+
+	req = backend.addHeadersAndHost(req)
+
+	client := http.Client{
+		Timeout:   backend.Options.Timeout,
+		Transport: backend.Options.Transport,
 	}
 
 	resp, err := client.Do(req)
-
-	if err == nil {
-		defer resp.Body.Close()
+	if err != nil {
+		return fmt.Errorf("HTTP request failed: %s", err)
 	}
-	return err == nil && resp.StatusCode == 200
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusBadRequest {
+		return fmt.Errorf("received error status code: %v", resp.StatusCode)
+	}
+
+	return nil
 }

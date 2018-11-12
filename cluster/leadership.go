@@ -2,14 +2,23 @@ package cluster
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"github.com/cenk/backoff"
+	"github.com/containous/mux"
 	"github.com/containous/traefik/log"
 	"github.com/containous/traefik/safe"
 	"github.com/containous/traefik/types"
 	"github.com/docker/leadership"
+	"github.com/unrolled/render"
 )
+
+const clusterLeaderKeySuffix = "/leader"
+
+var templatesRenderer = render.New(render.Options{
+	Directory: "nowhere",
+})
 
 // Leadership allows leadership election using a KV store
 type Leadership struct {
@@ -25,7 +34,7 @@ func NewLeadership(ctx context.Context, cluster *types.Cluster) *Leadership {
 	return &Leadership{
 		Pool:      safe.NewPool(ctx),
 		Cluster:   cluster,
-		candidate: leadership.NewCandidate(cluster.Store, cluster.Store.Prefix+"/leader", cluster.Node, 20*time.Second),
+		candidate: leadership.NewCandidate(cluster.Store, cluster.Store.Prefix+clusterLeaderKeySuffix, cluster.Node, 20*time.Second),
 		listeners: []LeaderListener{},
 		leader:    safe.New(false),
 	}
@@ -98,7 +107,40 @@ func (l *Leadership) onElection(elected bool) {
 	}
 }
 
+type leaderResponse struct {
+	Leader     bool   `json:"leader"`
+	LeaderNode string `json:"leader_node"`
+}
+
+func (l *Leadership) getLeaderHandler(response http.ResponseWriter, request *http.Request) {
+	leaderNode := ""
+	leaderKv, err := l.Cluster.Store.Get(l.Cluster.Store.Prefix+clusterLeaderKeySuffix, nil)
+	if err != nil {
+		log.Error(err)
+	} else {
+		leaderNode = string(leaderKv.Value)
+	}
+	leader := &leaderResponse{Leader: l.IsLeader(), LeaderNode: leaderNode}
+
+	status := http.StatusOK
+	if !leader.Leader {
+		// Set status to be `429`, as this will typically cause load balancers to stop sending requests to the instance without removing them from rotation.
+		status = http.StatusTooManyRequests
+	}
+
+	err = templatesRenderer.JSON(response, status, leader)
+	if err != nil {
+		log.Error(err)
+	}
+}
+
 // IsLeader returns true if current node is leader
 func (l *Leadership) IsLeader() bool {
 	return l.leader.Get().(bool)
+}
+
+// AddRoutes add dashboard routes on a router
+func (l *Leadership) AddRoutes(router *mux.Router) {
+	// Expose cluster leader
+	router.Methods(http.MethodGet).Path("/api/cluster/leader").HandlerFunc(l.getLeaderHandler)
 }

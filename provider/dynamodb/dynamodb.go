@@ -24,24 +24,31 @@ var _ provider.Provider = (*Provider)(nil)
 
 // Provider holds configuration for provider.
 type Provider struct {
-	provider.BaseProvider `mapstructure:",squash"`
-
-	AccessKeyID     string `description:"The AWS credentials access key to use for making requests"`
-	RefreshSeconds  int    `description:"Polling interval (in seconds)"`
-	Region          string `description:"The AWS region to use for requests"`
-	SecretAccessKey string `description:"The AWS credentals secret key to use for making requests"`
-	TableName       string `description:"The AWS dynamodb table that stores configuration for traefik"`
-	Endpoint        string `description:"The endpoint of a dynamodb. Used for testing with a local dynamodb"`
+	provider.BaseProvider `mapstructure:",squash" export:"true"`
+	AccessKeyID           string `description:"The AWS credentials access key to use for making requests"`
+	RefreshSeconds        int    `description:"Polling interval (in seconds)" export:"true"`
+	Region                string `description:"The AWS region to use for requests" export:"true"`
+	SecretAccessKey       string `description:"The AWS credentials secret key to use for making requests"`
+	TableName             string `description:"The AWS dynamodb table that stores configuration for traefik" export:"true"`
+	Endpoint              string `description:"The endpoint of a dynamodb. Used for testing with a local dynamodb"`
 }
 
 type dynamoClient struct {
 	db dynamodbiface.DynamoDBAPI
 }
 
+// Init the provider
+func (p *Provider) Init(constraints types.Constraints) error {
+	return p.BaseProvider.Init(constraints)
+}
+
 // createClient configures aws credentials and creates a dynamoClient
 func (p *Provider) createClient() (*dynamoClient, error) {
 	log.Info("Creating Provider client...")
-	sess := session.New()
+	sess, err := session.NewSession()
+	if err != nil {
+		return nil, err
+	}
 	if p.Region == "" {
 		return nil, errors.New("no Region provided for Provider")
 	}
@@ -72,7 +79,7 @@ func (p *Provider) createClient() (*dynamoClient, error) {
 	}
 
 	return &dynamoClient{
-		dynamodb.New(sess, cfg),
+		db: dynamodb.New(sess, cfg),
 	}, nil
 }
 
@@ -96,8 +103,8 @@ func (p *Provider) scanTable(client *dynamoClient) ([]map[string]*dynamodb.Attri
 	return items, nil
 }
 
-// loadDynamoConfig retrieves items from dynamodb and converts them into Backends and Frontends in a Configuration
-func (p *Provider) loadDynamoConfig(client *dynamoClient) (*types.Configuration, error) {
+// buildConfiguration retrieves items from dynamodb and converts them into Backends and Frontends in a Configuration
+func (p *Provider) buildConfiguration(client *dynamoClient) (*types.Configuration, error) {
 	items, err := p.scanTable(client)
 	if err != nil {
 		return nil, err
@@ -143,9 +150,7 @@ func (p *Provider) loadDynamoConfig(client *dynamoClient) (*types.Configuration,
 
 // Provide provides the configuration to traefik via the configuration channel
 // if watch is enabled it polls dynamodb
-func (p *Provider) Provide(configurationChan chan<- types.ConfigMessage, pool *safe.Pool, constraints types.Constraints) error {
-	log.Debugf("Providing Provider...")
-	p.Constraints = append(p.Constraints, constraints...)
+func (p *Provider) Provide(configurationChan chan<- types.ConfigMessage, pool *safe.Pool) error {
 	handleCanceled := func(ctx context.Context, err error) error {
 		if ctx.Err() == context.Canceled || err == context.Canceled {
 			return nil
@@ -156,19 +161,17 @@ func (p *Provider) Provide(configurationChan chan<- types.ConfigMessage, pool *s
 	pool.Go(func(stop chan bool) {
 		ctx, cancel := context.WithCancel(context.Background())
 		safe.Go(func() {
-			select {
-			case <-stop:
-				cancel()
-			}
+			<-stop
+			cancel()
 		})
 
 		operation := func() error {
-			aws, err := p.createClient()
+			awsClient, err := p.createClient()
 			if err != nil {
 				return handleCanceled(ctx, err)
 			}
 
-			configuration, err := p.loadDynamoConfig(aws)
+			configuration, err := p.buildConfiguration(awsClient)
 			if err != nil {
 				return handleCanceled(ctx, err)
 			}
@@ -185,7 +188,7 @@ func (p *Provider) Provide(configurationChan chan<- types.ConfigMessage, pool *s
 					log.Debug("Watching Provider...")
 					select {
 					case <-reload.C:
-						configuration, err := p.loadDynamoConfig(aws)
+						configuration, err := p.buildConfiguration(awsClient)
 						if err != nil {
 							return handleCanceled(ctx, err)
 						}

@@ -5,6 +5,8 @@ logLevel = "DEBUG"
 [entryPoints]
   [entryPoints.http]
   address = ":8000"
+  [entryPoints.api]
+  address = ":8081"
 
 
 [etcd]
@@ -12,5 +14,5 @@ logLevel = "DEBUG"
   prefix = "/traefik"
   watch = true
 
-[web]
-  address = ":8081"
+[api]
+  entryPoint = "api"

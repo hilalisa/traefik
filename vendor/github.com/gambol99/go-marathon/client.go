@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Rohith All rights reserved.
+Copyright 2014 The go-marathon Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -68,6 +69,40 @@ type Marathon interface {
 	ApplicationByVersion(name, version string) (*Application, error)
 	// wait of application
 	WaitOnApplication(name string, timeout time.Duration) error
+
+	// -- PODS ---
+	// whether this version of Marathon supports pods
+	SupportsPods() (bool, error)
+
+	// get pod status
+	PodStatus(name string) (*PodStatus, error)
+	// get all pod statuses
+	PodStatuses() ([]*PodStatus, error)
+
+	// get pod
+	Pod(name string) (*Pod, error)
+	// get all pods
+	Pods() ([]Pod, error)
+	// create pod
+	CreatePod(pod *Pod) (*Pod, error)
+	// update pod
+	UpdatePod(pod *Pod, force bool) (*Pod, error)
+	// delete pod
+	DeletePod(name string, force bool) (*DeploymentID, error)
+	// wait on pod to be deployed
+	WaitOnPod(name string, timeout time.Duration) error
+	// check if a pod is running
+	PodIsRunning(name string) bool
+
+	// get versions of a pod
+	PodVersions(name string) ([]string, error)
+	// get pod by version
+	PodByVersion(name, version string) (*Pod, error)
+
+	// delete instances of a pod
+	DeletePodInstances(name string, instances []string) ([]*PodInstance, error)
+	// delete pod instance
+	DeletePodInstance(name, instance string) (*PodInstance, error)
 
 	// -- TASKS ---
 
@@ -154,6 +189,24 @@ var (
 	ErrMarathonDown = errors.New("all the Marathon hosts are presently down")
 	// ErrTimeoutError is thrown when the operation has timed out
 	ErrTimeoutError = errors.New("the operation has timed out")
+
+	// Default HTTP client used for SSE subscription requests
+	// It is invalid to set client.Timeout because it includes time to read response so
+	// set dial, tls handshake and response header timeouts instead
+	defaultHTTPSSEClient = &http.Client{
+		Transport: &http.Transport{
+			Dial: (&net.Dialer{
+				Timeout: 5 * time.Second,
+			}).Dial,
+			ResponseHeaderTimeout: 10 * time.Second,
+			TLSHandshakeTimeout:   5 * time.Second,
+		},
+	}
+
+	// Default HTTP client used for non SSE requests
+	defaultHTTPClient = &http.Client{
+		Timeout: 10 * time.Second,
+	}
 )
 
 // EventsChannelContext holds contextual data for an EventsChannel.
@@ -177,8 +230,8 @@ type marathonClient struct {
 	hosts *cluster
 	// a map of service you wish to listen to
 	listeners map[EventsChannel]EventsChannelContext
-	// a custom logger for debug log messages
-	debugLog *log.Logger
+	// a custom log function for debug messages
+	debugLog func(format string, v ...interface{})
 	// the marathon HTTP client to ensure consistency in requests
 	client *httpClient
 }
@@ -196,9 +249,18 @@ type newRequestError struct {
 // NewClient creates a new marathon client
 //		config:			the configuration to use
 func NewClient(config Config) (Marathon, error) {
-	// step: if no http client, set to default
+	// step: if the SSE HTTP client is missing, prefer a configured regular
+	// client, and otherwise use the default SSE HTTP client.
+	if config.HTTPSSEClient == nil {
+		config.HTTPSSEClient = defaultHTTPSSEClient
+		if config.HTTPClient != nil {
+			config.HTTPSSEClient = config.HTTPClient
+		}
+	}
+
+	// step: if a regular HTTP client is missing, use the default one.
 	if config.HTTPClient == nil {
-		config.HTTPClient = http.DefaultClient
+		config.HTTPClient = defaultHTTPClient
 	}
 
 	// step: if no polling wait time is set, default to 500 milliseconds.
@@ -215,16 +277,19 @@ func NewClient(config Config) (Marathon, error) {
 		return nil, err
 	}
 
-	debugLogOutput := config.LogOutput
-	if debugLogOutput == nil {
-		debugLogOutput = ioutil.Discard
+	debugLog := func(string, ...interface{}) {}
+	if config.LogOutput != nil {
+		logger := log.New(config.LogOutput, "", 0)
+		debugLog = func(format string, v ...interface{}) {
+			logger.Printf(format, v...)
+		}
 	}
 
 	return &marathonClient{
 		config:    config,
 		listeners: make(map[EventsChannel]EventsChannelContext),
 		hosts:     hosts,
-		debugLog:  log.New(debugLogOutput, "", 0),
+		debugLog:  debugLog,
 		client:    client,
 	}, nil
 }
@@ -240,6 +305,10 @@ func (r *marathonClient) Ping() (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func (r *marathonClient) apiHead(path string, result interface{}) error {
+	return r.apiCall("HEAD", path, nil, result)
 }
 
 func (r *marathonClient) apiGet(path string, post, result interface{}) error {
@@ -259,6 +328,8 @@ func (r *marathonClient) apiDelete(path string, post, result interface{}) error 
 }
 
 func (r *marathonClient) apiCall(method, path string, body, result interface{}) error {
+	const deploymentHeader = "Marathon-Deployment-Id"
+
 	for {
 		// step: marshall the request to json
 		var requestBody []byte
@@ -280,7 +351,7 @@ func (r *marathonClient) apiCall(method, path string, body, result interface{}) 
 		if err != nil {
 			r.hosts.markDown(member)
 			// step: attempt the request on another member
-			r.debugLog.Printf("apiCall(): request failed on host: %s, error: %s, trying another\n", member, err)
+			r.debugLog("apiCall(): request failed on host: %s, error: %s, trying another", member, err)
 			continue
 		}
 		defer response.Body.Close()
@@ -292,16 +363,29 @@ func (r *marathonClient) apiCall(method, path string, body, result interface{}) 
 		}
 
 		if len(requestBody) > 0 {
-			r.debugLog.Printf("apiCall(): %v %v %s returned %v %s\n", request.Method, request.URL.String(), requestBody, response.Status, oneLogLine(respBody))
+			r.debugLog("apiCall(): %v %v %s returned %v %s", request.Method, request.URL.String(), requestBody, response.Status, oneLogLine(respBody))
 		} else {
-			r.debugLog.Printf("apiCall(): %v %v returned %v %s\n", request.Method, request.URL.String(), response.Status, oneLogLine(respBody))
+			r.debugLog("apiCall(): %v %v returned %v %s", request.Method, request.URL.String(), response.Status, oneLogLine(respBody))
 		}
 
-		// step: check for a successfull response
+		// step: check for a successful response
 		if response.StatusCode >= 200 && response.StatusCode <= 299 {
 			if result != nil {
-				if err := json.Unmarshal(respBody, result); err != nil {
-					return fmt.Errorf("failed to unmarshal response from Marathon: %s", err)
+				// If we have a deployment ID header and no response body, give them that
+				// This specifically handles the use case of a DELETE on an app/pod
+				// We need a way to retrieve the deployment ID
+				deploymentID := response.Header.Get(deploymentHeader)
+				if len(respBody) == 0 && deploymentID != "" {
+					d := DeploymentID{
+						DeploymentID: deploymentID,
+					}
+					if deployID, ok := result.(*DeploymentID); ok {
+						*deployID = d
+					}
+				} else {
+					if err := json.Unmarshal(respBody, result); err != nil {
+						return fmt.Errorf("failed to unmarshal response from Marathon: %s", err)
+					}
 				}
 			}
 			return nil
@@ -311,11 +395,32 @@ func (r *marathonClient) apiCall(method, path string, body, result interface{}) 
 		if response.StatusCode >= 500 && response.StatusCode <= 599 {
 			// step: mark the host as down
 			r.hosts.markDown(member)
-			r.debugLog.Printf("apiCall(): request failed, host: %s, status: %d, trying another\n", member, response.StatusCode)
+			r.debugLog("apiCall(): request failed, host: %s, status: %d, trying another", member, response.StatusCode)
 			continue
 		}
 
 		return NewAPIError(response.StatusCode, respBody)
+	}
+}
+
+// wait waits until the provided function returns true (or times out)
+func (r *marathonClient) wait(name string, timeout time.Duration, fn func(string) bool) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(r.config.PollingWaitTime)
+	defer ticker.Stop()
+	for {
+		if fn(name) {
+			return nil
+		}
+
+		select {
+		case <-timer.C:
+			return ErrTimeoutError
+		case <-ticker.C:
+			continue
+		}
 	}
 }
 
@@ -329,16 +434,28 @@ func (r *marathonClient) buildAPIRequest(method, path string, reader io.Reader) 
 	}
 
 	// Build the HTTP request to Marathon
-	request, err = r.client.buildMarathonRequest(method, member, path, reader)
+	request, err = r.client.buildMarathonJSONRequest(method, member, path, reader)
 	if err != nil {
 		return nil, member, newRequestError{err}
 	}
 	return request, member, nil
 }
 
+// buildMarathonJSONRequest is like buildMarathonRequest but sets the
+// Content-Type and Accept headers to application/json.
+func (rc *httpClient) buildMarathonJSONRequest(method, member, path string, reader io.Reader) (request *http.Request, err error) {
+	req, err := rc.buildMarathonRequest(method, member, path, reader)
+	if err == nil {
+		req.Header.Add("Content-Type", "application/json")
+		req.Header.Add("Accept", "application/json")
+	}
+
+	return req, err
+}
+
 // buildMarathonRequest creates a new HTTP request and configures it according to the *httpClient configuration.
 // The path must not contain a leading "/", otherwise buildMarathonRequest will panic.
-func (rc *httpClient) buildMarathonRequest(method string, member string, path string, reader io.Reader) (request *http.Request, err error) {
+func (rc *httpClient) buildMarathonRequest(method, member, path string, reader io.Reader) (request *http.Request, err error) {
 	if strings.HasPrefix(path, "/") {
 		panic(fmt.Sprintf("Path '%s' must not start with a leading slash", path))
 	}
@@ -360,9 +477,6 @@ func (rc *httpClient) buildMarathonRequest(method string, member string, path st
 	if rc.config.DCOSToken != "" {
 		request.Header.Add("Authorization", "token="+rc.config.DCOSToken)
 	}
-
-	request.Header.Add("Content-Type", "application/json")
-	request.Header.Add("Accept", "application/json")
 
 	return request, nil
 }

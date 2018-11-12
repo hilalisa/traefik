@@ -3,20 +3,10 @@
 ## Main Section
 
 ```toml
-# DEPRECATED - for general usage instruction see [lifeCycle.graceTimeOut].
-#
-# If both the deprecated option and the new one are given, the deprecated one
-# takes precedence.
-# A value of zero is equivalent to omitting the parameter, causing
-# [lifeCycle.graceTimeOut] to be effective. Pass zero to the new option in
-# order to disable the grace period.
-#
-# Optional
-# Default: "0s"
-#
-# graceTimeOut = "10s"
-
 # Enable debug mode.
+# This will install HTTP handlers to expose Go expvars under /debug/vars and
+# pprof profiling data under /debug/pprof/.
+# The log level will be set to DEBUG unless `logLevel` is specified.
 #
 # Optional
 # Default: false
@@ -30,19 +20,26 @@
 #
 # checkNewVersion = false
 
-# Backends throttle duration.
+# Tells traefik whether it should keep the trailing slashes in the paths (e.g. /paths/) or redirect to the no trailing slash paths instead (/paths).
+#
+# Optional
+# Default: false
+#
+# keepTrailingSlash = false
+
+# Providers throttle duration.
 #
 # Optional
 # Default: "2s"
 #
-# ProvidersThrottleDuration = "2s"
+# providersThrottleDuration = "2s"
 
 # Controls the maximum idle (keep-alive) connections to keep per-host.
 #
 # Optional
 # Default: 200
 #
-# MaxIdleConnsPerHost = 200
+# maxIdleConnsPerHost = 200
 
 # If set to true invalid SSL certificates are accepted for backends.
 # This disables detection of man-in-the-middle attacks so should only be used on secure backend networks.
@@ -50,14 +47,14 @@
 # Optional
 # Default: false
 #
-# InsecureSkipVerify = true
+# insecureSkipVerify = true
 
-# Register Certificates in the RootCA.
+# Register Certificates in the rootCA.
 #
 # Optional
 # Default: []
 #
-# RootCAs = [ "/mycert.cert" ]
+# rootCAs = [ "/mycert.cert" ]
 
 # Entrypoints to be used by frontends that do not specify any entrypoint.
 # Each frontend can specify its own entrypoints.
@@ -68,35 +65,49 @@
 # defaultEntryPoints = ["http", "https"]
 ```
 
-- `graceTimeOut`: Duration to give active requests a chance to finish before Traefik stops.  
-Can be provided in a format supported by [time.ParseDuration](https://golang.org/pkg/time/#ParseDuration) or as raw values (digits).
-If no units are provided, the value is parsed assuming seconds.  
-**Note:** in this time frame no new requests are accepted.
-
-- `ProvidersThrottleDuration`: Backends throttle duration: minimum duration in seconds between 2 events from providers before applying a new configuration.
+- `providersThrottleDuration`: Providers throttle duration: minimum duration in seconds between 2 events from providers before applying a new configuration.
 It avoids unnecessary reloads if multiples events are sent in a short amount of time.  
 Can be provided in a format supported by [time.ParseDuration](https://golang.org/pkg/time/#ParseDuration) or as raw values (digits).
 If no units are provided, the value is parsed assuming seconds.
 
-- `MaxIdleConnsPerHost`: Controls the maximum idle (keep-alive) connections to keep per-host.  
+- `maxIdleConnsPerHost`: Controls the maximum idle (keep-alive) connections to keep per-host.  
 If zero, `DefaultMaxIdleConnsPerHost` from the Go standard library net/http module is used.
 If you encounter 'too many open files' errors, you can either increase this value or change the `ulimit`.
 
-- `InsecureSkipVerify` : If set to true invalid SSL certificates are accepted for backends.  
+- `insecureSkipVerify` : If set to true invalid SSL certificates are accepted for backends.  
 **Note:** This disables detection of man-in-the-middle attacks so should only be used on secure backend networks.
 
-- `RootCAs`: Register Certificates in the RootCA. This certificates will be use for backends calls.  
+- `rootCAs`: Register Certificates in the RootCA. This certificates will be use for backends calls.  
 **Note** You can use file path or cert content directly
 
 - `defaultEntryPoints`: Entrypoints to be used by frontends that do not specify any entrypoint.  
 Each frontend can specify its own entrypoints.
 
+- `keepTrailingSlash`: Tells Træfik whether it should keep the trailing slashes that might be present in the paths of incoming requests (true), or if it should redirect to the slashless version of the URL (default behavior: false) 
+
+!!! note 
+    Beware that the value of `keepTrailingSlash` can have a significant impact on the way your frontend rules are interpreted.
+    The table below tries to sum up several behaviors depending on requests/configurations. 
+    The current default behavior is deprecated and kept for compatibility reasons. 
+    As a consequence, we encourage you to set `keepTrailingSlash` to true.
+    
+    | Incoming request     | keepTrailingSlash | Path:{value} | Behavior                              
+    |----------------------|-------------------|--------------|----------------------------|
+    | http://foo.com/path/ | false             | Path:/path/  | Proceeds with the request  |
+    | http://foo.com/path/ | false             | Path:/path   | 301 to http://foo.com/path |           
+    | http://foo.com/path  | false             | Path:/path/  | Proceeds with the request  |
+    | http://foo.com/path  | false             | Path:/path   | Proceeds with the request  |
+    | http://foo.com/path/ | true              | Path:/path/  | Proceeds with the request  |
+    | http://foo.com/path/ | true              | Path:/path   | 404                        |
+    | http://foo.com/path  | true              | Path:/path/  | 404                        |
+    | http://foo.com/path  | true              | Path:/path   | Proceeds with the request  |
+
 
 ## Constraints
 
-In a micro-service architecture, with a central service discovery, setting constraints limits Træfik scope to a smaller number of routes.
+In a micro-service architecture, with a central service discovery, setting constraints limits Traefik scope to a smaller number of routes.
 
-Træfik filters services according to service attributes/tags set in your configuration backends.
+Traefik filters services according to service attributes/tags set in your providers.
 
 Supported filters:
 
@@ -124,14 +135,15 @@ constraints = ["tag==us-*"]
 constraints = ["tag!=us-*", "tag!=asia-*"]
 ```
 
-### Backend-specific
+### provider-specific
 
-Supported backends:
+Supported Providers:
 
 - Docker
 - Consul K/V
 - BoltDB
 - Zookeeper
+- ECS
 - Etcd
 - Consul Catalog
 - Rancher
@@ -139,99 +151,16 @@ Supported backends:
 - Kubernetes (using a provider-specific mechanism based on label selectors)
 
 ```toml
-# Backend-specific constraint
+# Provider-specific constraint
 [consulCatalog]
 # ...
 constraints = ["tag==api"]
 
-# Backend-specific constraint
+# Provider-specific constraint
 [marathon]
 # ...
 constraints = ["tag==api", "tag!=v*-beta"]
 ```
-
-
-## Logs Definition
-
-### Traefik logs
-
-```toml
-# Traefik logs file
-# If not defined, logs to stdout
-#
-# DEPRECATED - see [traefikLog] lower down
-# In case both traefikLogsFile and traefikLog.filePath are specified, the latter will take precedence.
-# Optional
-#
-traefikLogsFile = "log/traefik.log"
-
-# Log level
-#
-# Optional
-# Default: "ERROR"
-#
-# Accepted values, in order of severity: "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "PANIC"
-# Messages at and above the selected level will be logged.
-#
-logLevel = "ERROR"
-```
-
-## Traefik Logs
-
-By default the Traefik log is written to stdout in text format.
-
-To write the logs into a logfile specify the `filePath`.
-```toml
-[traefikLog]
-  filePath = "/path/to/traefik.log"
-```
-
-To write JSON format logs, specify `json` as the format:
-```toml
-[traefikLog]
-  filePath = "/path/to/traefik.log"
-  format   = "json"
-```
-
-### Access Logs
-
-Access logs are written when `[accessLog]` is defined.
-By default it will write to stdout and produce logs in the textual Common Log Format (CLF), extended with additional fields.
-
-To enable access logs using the default settings just add the `[accessLog]` entry.
-```toml
-[accessLog]
-```
-
-To write the logs into a logfile specify the `filePath`.
-```toml
-[accessLog]
-filePath = "/path/to/access.log"
-```
-
-To write JSON format logs, specify `json` as the format:
-```toml
-[accessLog]
-filePath = "/path/to/access.log"
-format = "json"
-```
-
-Deprecated way (before 1.4):
-```toml
-# Access logs file
-#
-# DEPRECATED - see [accessLog] lower down
-#
-accessLogsFile = "log/access.log"
-```
-
-### Log Rotation
-
-Traefik will close and reopen its log files, assuming they're configured, on receipt of a USR1 signal.
-This allows the logs to be rotated and processed by an external program, such as `logrotate`.
-
-!!! note
-    This does not work on Windows due to the lack of USR signals.
 
 
 ## Custom Error pages
@@ -270,9 +199,52 @@ Instead, the query parameter can also be set to some generic error page like so:
 Now the `500s.html` error page is returned for the configured code range.
 The configured status code ranges are inclusive; that is, in the above example, the `500s.html` page will be returned for status codes `500` through, and including, `599`.
 
-Custom error pages are easiest to implement using the file provider.
-For dynamic providers, the corresponding template file needs to be customized accordingly and referenced in the Traefik configuration.
 
+## Rate limiting
+
+Rate limiting can be configured per frontend.  
+Multiple sets of rates can be added to each frontend, but the time periods must be unique.
+
+```toml
+[frontends]
+    [frontends.frontend1]
+      # ...
+      [frontends.frontend1.ratelimit]
+        extractorfunc = "client.ip"
+          [frontends.frontend1.ratelimit.rateset.rateset1]
+            period = "10s"
+            average = 100
+            burst = 200
+          [frontends.frontend1.ratelimit.rateset.rateset2]
+            period = "3s"
+            average = 5
+            burst = 10
+```
+
+In the above example, frontend1 is configured to limit requests by the client's ip address.  
+An average of 5 requests every 3 seconds is allowed and an average of 100 requests every 10 seconds.  
+These can "burst" up to 10 and 200 in each period respectively.
+
+## Buffering
+
+In some cases request/buffering can be enabled for a specific backend.
+By enabling this, Traefik will read the entire request into memory (possibly buffering large requests into disk) and will reject requests that are over a specified limit.
+This may help services deal with large data (multipart/form-data for example) more efficiently and should minimise time spent when sending data to a backend server.
+
+For more information please check [oxy/buffer](http://godoc.org/github.com/vulcand/oxy/buffer) documentation.
+
+Example configuration:
+
+```toml
+[backends]
+  [backends.backend1]
+    [backends.backend1.buffering]
+      maxRequestBodyBytes = 10485760  
+      memRequestBodyBytes = 2097152  
+      maxResponseBodyBytes = 10485760
+      memResponseBodyBytes = 2097152
+      retryExpression = "IsNetworkError() && Attempts() <= 2"
+```
 
 ## Retry Configuration
 
@@ -295,19 +267,23 @@ For dynamic providers, the corresponding template file needs to be customized ac
 # Enable custom health check options.
 [healthcheck]
 
-# Set the default health check interval.
+# Set the default health check interval and timeout.
 #
 # Optional
 # Default: "30s"
 #
 # interval = "30s"
+# timeout = "5s"
 ```
 
-- `interval` set the default health check interval.  
-Will only be effective if health check paths are defined.  
-Given provider-specific support, the value may be overridden on a per-backend basis.  
-Can be provided in a format supported by [time.ParseDuration](https://golang.org/pkg/time/#ParseDuration) or as raw values (digits).  
+- `interval` sets the default health check interval.
+- `timeout` sets the default health check request timeout.
+
+These options will only be effective if health check paths are defined.
+Given provider-specific support, the value may be overridden on a per-backend basis.
+Can be provided in a format supported by [time.ParseDuration](https://golang.org/pkg/time/#ParseDuration) or as raw values (digits).
 If no units are provided, the value is parsed assuming seconds.
+**Note:** the interval must be greater than the timeout. If configuration doesn't reflect this, the interval will be set to timeout + 1 second.
 
 ## Life Cycle
 
@@ -420,41 +396,50 @@ If zero, no timeout exists.
 Can be provided in a format supported by [time.ParseDuration](https://golang.org/pkg/time/#ParseDuration) or as raw values (digits).
 If no units are provided, the value is parsed assuming seconds.
 
+## Host Resolver
 
-### Idle Timeout (deprecated)
-
-Use [respondingTimeouts](/configuration/commons/#responding-timeouts) instead of `IdleTimeout`.
-In the case both settings are configured, the deprecated option will be overwritten.
-
-`IdleTimeout` is the maximum amount of time an idle (keep-alive) connection will remain idle before closing itself.
-This is set to enforce closing of stale client connections.
-
-Can be provided in a format supported by [time.ParseDuration](https://golang.org/pkg/time/#ParseDuration) or as raw values (digits).
-If no units are provided, the value is parsed assuming seconds.
+`hostResolver` are used for request host matching process.
 
 ```toml
-# IdleTimeout
-#
-# DEPRECATED - see [respondingTimeouts] section.
+[hostResolver]
+
+# cnameFlattening is a trigger to flatten request host, assuming it is a CNAME record
 #
 # Optional
-# Default: "180s"
+# Default : false
 #
-IdleTimeout = "360s"
+cnameFlattening = true
+
+# resolvConf is dns resolving configuration file, the default is /etc/resolv.conf
+#
+# Optional
+# Default : "/etc/resolv.conf"
+#
+# resolvConf = "/etc/resolv.conf"
+
+# resolvDepth is the maximum CNAME recursive lookup
+#
+# Optional
+# Default : 5
+#
+# resolvDepth = 5
 ```
 
+- To allow serving secure https request and generate the SSL using ACME while `cnameFlattening` is active. 
+The `acme` configuration for `HTTP-01` challenge and `onDemand` is mandatory. 
+Refer to [ACME configuration](/configuration/acme) for more information.
 
 ## Override Default Configuration Template
 
 !!! warning
     For advanced users only.
 
-Supported by all backends except: File backend, Web backend and DynamoDB backend.
+Supported by all providers except: File Provider, Rest Provider and DynamoDB Provider.
 
 ```toml
-[backend_name]
+[provider_name]
 
-# Override default configuration template. For advanced users :)
+# Override default provider configuration template. For advanced users :)
 #
 # Optional
 # Default: ""

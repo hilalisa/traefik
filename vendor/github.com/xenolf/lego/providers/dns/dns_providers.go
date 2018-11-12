@@ -1,80 +1,143 @@
-// Factory for DNS providers
 package dns
 
 import (
 	"fmt"
 
 	"github.com/xenolf/lego/acme"
+	"github.com/xenolf/lego/providers/dns/acmedns"
+	"github.com/xenolf/lego/providers/dns/alidns"
 	"github.com/xenolf/lego/providers/dns/auroradns"
 	"github.com/xenolf/lego/providers/dns/azure"
+	"github.com/xenolf/lego/providers/dns/bluecat"
 	"github.com/xenolf/lego/providers/dns/cloudflare"
+	"github.com/xenolf/lego/providers/dns/cloudxns"
 	"github.com/xenolf/lego/providers/dns/digitalocean"
 	"github.com/xenolf/lego/providers/dns/dnsimple"
 	"github.com/xenolf/lego/providers/dns/dnsmadeeasy"
 	"github.com/xenolf/lego/providers/dns/dnspod"
+	"github.com/xenolf/lego/providers/dns/dreamhost"
+	"github.com/xenolf/lego/providers/dns/duckdns"
 	"github.com/xenolf/lego/providers/dns/dyn"
+	"github.com/xenolf/lego/providers/dns/exec"
 	"github.com/xenolf/lego/providers/dns/exoscale"
+	"github.com/xenolf/lego/providers/dns/fastdns"
 	"github.com/xenolf/lego/providers/dns/gandi"
-	"github.com/xenolf/lego/providers/dns/googlecloud"
+	"github.com/xenolf/lego/providers/dns/gandiv5"
+	"github.com/xenolf/lego/providers/dns/gcloud"
+	"github.com/xenolf/lego/providers/dns/glesys"
+	"github.com/xenolf/lego/providers/dns/godaddy"
+	"github.com/xenolf/lego/providers/dns/hostingde"
+	"github.com/xenolf/lego/providers/dns/iij"
+	"github.com/xenolf/lego/providers/dns/lightsail"
 	"github.com/xenolf/lego/providers/dns/linode"
+	"github.com/xenolf/lego/providers/dns/linodev4"
 	"github.com/xenolf/lego/providers/dns/namecheap"
+	"github.com/xenolf/lego/providers/dns/namedotcom"
+	"github.com/xenolf/lego/providers/dns/netcup"
+	"github.com/xenolf/lego/providers/dns/nifcloud"
 	"github.com/xenolf/lego/providers/dns/ns1"
+	"github.com/xenolf/lego/providers/dns/otc"
 	"github.com/xenolf/lego/providers/dns/ovh"
 	"github.com/xenolf/lego/providers/dns/pdns"
 	"github.com/xenolf/lego/providers/dns/rackspace"
 	"github.com/xenolf/lego/providers/dns/rfc2136"
 	"github.com/xenolf/lego/providers/dns/route53"
+	"github.com/xenolf/lego/providers/dns/sakuracloud"
+	"github.com/xenolf/lego/providers/dns/stackpath"
+	"github.com/xenolf/lego/providers/dns/vegadns"
 	"github.com/xenolf/lego/providers/dns/vultr"
 )
 
+// NewDNSChallengeProviderByName Factory for DNS providers
 func NewDNSChallengeProviderByName(name string) (acme.ChallengeProvider, error) {
-	var err error
-	var provider acme.ChallengeProvider
 	switch name {
+	case "acme-dns":
+		return acmedns.NewDNSProvider()
+	case "alidns":
+		return alidns.NewDNSProvider()
 	case "azure":
-		provider, err = azure.NewDNSProvider()
+		return azure.NewDNSProvider()
 	case "auroradns":
-		provider, err = auroradns.NewDNSProvider()
+		return auroradns.NewDNSProvider()
+	case "bluecat":
+		return bluecat.NewDNSProvider()
 	case "cloudflare":
-		provider, err = cloudflare.NewDNSProvider()
+		return cloudflare.NewDNSProvider()
+	case "cloudxns":
+		return cloudxns.NewDNSProvider()
 	case "digitalocean":
-		provider, err = digitalocean.NewDNSProvider()
+		return digitalocean.NewDNSProvider()
 	case "dnsimple":
-		provider, err = dnsimple.NewDNSProvider()
+		return dnsimple.NewDNSProvider()
 	case "dnsmadeeasy":
-		provider, err = dnsmadeeasy.NewDNSProvider()
+		return dnsmadeeasy.NewDNSProvider()
 	case "dnspod":
-		provider, err = dnspod.NewDNSProvider()
+		return dnspod.NewDNSProvider()
+	case "dreamhost":
+		return dreamhost.NewDNSProvider()
+	case "duckdns":
+		return duckdns.NewDNSProvider()
 	case "dyn":
-		provider, err = dyn.NewDNSProvider()
+		return dyn.NewDNSProvider()
+	case "fastdns":
+		return fastdns.NewDNSProvider()
+	case "exec":
+		return exec.NewDNSProvider()
 	case "exoscale":
-		provider, err = exoscale.NewDNSProvider()		
+		return exoscale.NewDNSProvider()
 	case "gandi":
-		provider, err = gandi.NewDNSProvider()
+		return gandi.NewDNSProvider()
+	case "gandiv5":
+		return gandiv5.NewDNSProvider()
+	case "glesys":
+		return glesys.NewDNSProvider()
 	case "gcloud":
-		provider, err = googlecloud.NewDNSProvider()
+		return gcloud.NewDNSProvider()
+	case "godaddy":
+		return godaddy.NewDNSProvider()
+	case "hostingde":
+		return hostingde.NewDNSProvider()
+	case "iij":
+		return iij.NewDNSProvider()
+	case "lightsail":
+		return lightsail.NewDNSProvider()
 	case "linode":
-		provider, err = linode.NewDNSProvider()
+		return linode.NewDNSProvider()
+	case "linodev4":
+		return linodev4.NewDNSProvider()
 	case "manual":
-		provider, err = acme.NewDNSProviderManual()
+		return acme.NewDNSProviderManual()
 	case "namecheap":
-		provider, err = namecheap.NewDNSProvider()
-	case "rackspace":
-		provider, err = rackspace.NewDNSProvider()
-	case "route53":
-		provider, err = route53.NewDNSProvider()
-	case "rfc2136":
-		provider, err = rfc2136.NewDNSProvider()
-	case "vultr":
-		provider, err = vultr.NewDNSProvider()
-	case "ovh":
-		provider, err = ovh.NewDNSProvider()
-	case "pdns":
-		provider, err = pdns.NewDNSProvider()
+		return namecheap.NewDNSProvider()
+	case "namedotcom":
+		return namedotcom.NewDNSProvider()
+	case "netcup":
+		return netcup.NewDNSProvider()
+	case "nifcloud":
+		return nifcloud.NewDNSProvider()
 	case "ns1":
-		provider, err = ns1.NewDNSProvider()
+		return ns1.NewDNSProvider()
+	case "otc":
+		return otc.NewDNSProvider()
+	case "ovh":
+		return ovh.NewDNSProvider()
+	case "pdns":
+		return pdns.NewDNSProvider()
+	case "rackspace":
+		return rackspace.NewDNSProvider()
+	case "route53":
+		return route53.NewDNSProvider()
+	case "rfc2136":
+		return rfc2136.NewDNSProvider()
+	case "sakuracloud":
+		return sakuracloud.NewDNSProvider()
+	case "stackpath":
+		return stackpath.NewDNSProvider()
+	case "vegadns":
+		return vegadns.NewDNSProvider()
+	case "vultr":
+		return vultr.NewDNSProvider()
 	default:
-		err = fmt.Errorf("Unrecognised DNS provider: %s", name)
+		return nil, fmt.Errorf("unrecognised DNS provider: %s", name)
 	}
-	return provider, err
 }

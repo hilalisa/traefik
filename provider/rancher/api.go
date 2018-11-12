@@ -11,7 +11,7 @@ import (
 	"github.com/containous/traefik/safe"
 	"github.com/containous/traefik/types"
 	"github.com/mitchellh/mapstructure"
-	rancher "github.com/rancher/go-rancher/client"
+	rancher "github.com/rancher/go-rancher/v2"
 )
 
 const (
@@ -55,8 +55,7 @@ func getenv(key, fallback string) string {
 	return value
 }
 
-func (p *Provider) apiProvide(configurationChan chan<- types.ConfigMessage, pool *safe.Pool, constraints types.Constraints) error {
-	p.Constraints = append(p.Constraints, constraints...)
+func (p *Provider) apiProvide(configurationChan chan<- types.ConfigMessage, pool *safe.Pool) error {
 
 	if p.API == nil {
 		p.API = &APIConfiguration{}
@@ -72,13 +71,13 @@ func (p *Provider) apiProvide(configurationChan chan<- types.ConfigMessage, pool
 			}
 
 			ctx := context.Background()
-			var environments = listRancherEnvironments(rancherClient)
+			var stacks = listRancherStacks(rancherClient)
 			var services = listRancherServices(rancherClient)
 			var container = listRancherContainer(rancherClient)
 
-			var rancherData = parseAPISourcedRancherData(environments, services, container)
+			var rancherData = parseAPISourcedRancherData(stacks, services, container)
 
-			configuration := p.loadRancherConfig(rancherData)
+			configuration := p.buildConfiguration(rancherData)
 			configurationChan <- types.ConfigMessage{
 				ProviderName:  "rancher",
 				Configuration: configuration,
@@ -91,19 +90,24 @@ func (p *Provider) apiProvide(configurationChan chan<- types.ConfigMessage, pool
 					for {
 						select {
 						case <-ticker.C:
+							checkAPI, errAPI := rancherClient.ApiKey.List(withoutPagination)
 
-							log.Debugf("Refreshing new Data from Provider API")
-							var environments = listRancherEnvironments(rancherClient)
-							var services = listRancherServices(rancherClient)
-							var container = listRancherContainer(rancherClient)
+							if errAPI != nil {
+								log.Errorf("Cannot establish connection: %+v, Rancher API return: %+v; Skipping refresh Data from Rancher API.", errAPI, checkAPI)
+							} else {
+								log.Debugf("Refreshing new Data from Rancher API")
+								stacks := listRancherStacks(rancherClient)
+								services := listRancherServices(rancherClient)
+								container := listRancherContainer(rancherClient)
 
-							rancherData := parseAPISourcedRancherData(environments, services, container)
+								rancherData := parseAPISourcedRancherData(stacks, services, container)
 
-							configuration := p.loadRancherConfig(rancherData)
-							if configuration != nil {
-								configurationChan <- types.ConfigMessage{
-									ProviderName:  "rancher",
-									Configuration: configuration,
+								configuration := p.buildConfiguration(rancherData)
+								if configuration != nil {
+									configurationChan <- types.ConfigMessage{
+										ProviderName:  "rancher",
+										Configuration: configuration,
+									}
 								}
 							}
 						case <-stop:
@@ -129,29 +133,26 @@ func (p *Provider) apiProvide(configurationChan chan<- types.ConfigMessage, pool
 	return nil
 }
 
-func listRancherEnvironments(client *rancher.RancherClient) []*rancher.Environment {
+func listRancherStacks(client *rancher.RancherClient) []*rancher.Stack {
 
-	// Rancher Environment in frontend UI is actually a stack
-	// https://forums.rancher.com/t/api-key-for-all-environments/279/9
+	var stackList []*rancher.Stack
 
-	var environmentList = []*rancher.Environment{}
-
-	environments, err := client.Environment.List(nil)
+	stacks, err := client.Stack.List(withoutPagination)
 
 	if err != nil {
-		log.Errorf("Cannot get Rancher Environments %+v", err)
+		log.Errorf("Cannot get Provider Stacks %+v", err)
 	}
 
-	for k := range environments.Data {
-		environmentList = append(environmentList, &environments.Data[k])
+	for k := range stacks.Data {
+		stackList = append(stackList, &stacks.Data[k])
 	}
 
-	return environmentList
+	return stackList
 }
 
 func listRancherServices(client *rancher.RancherClient) []*rancher.Service {
 
-	var servicesList = []*rancher.Service{}
+	var servicesList []*rancher.Service
 
 	services, err := client.Service.List(withoutPagination)
 
@@ -168,7 +169,7 @@ func listRancherServices(client *rancher.RancherClient) []*rancher.Service {
 
 func listRancherContainer(client *rancher.RancherClient) []*rancher.Container {
 
-	containerList := []*rancher.Container{}
+	var containerList []*rancher.Container
 
 	container, err := client.Container.List(withoutPagination)
 
@@ -197,19 +198,19 @@ func listRancherContainer(client *rancher.RancherClient) []*rancher.Container {
 	return containerList
 }
 
-func parseAPISourcedRancherData(environments []*rancher.Environment, services []*rancher.Service, containers []*rancher.Container) []rancherData {
+func parseAPISourcedRancherData(stacks []*rancher.Stack, services []*rancher.Service, containers []*rancher.Container) []rancherData {
 	var rancherDataList []rancherData
 
-	for _, environment := range environments {
+	for _, stack := range stacks {
 
 		for _, service := range services {
 
-			if service.EnvironmentId != environment.Id {
+			if service.StackId != stack.Id {
 				continue
 			}
 
-			rancherData := rancherData{
-				Name:       environment.Name + "/" + service.Name,
+			rData := rancherData{
+				Name:       service.Name + "/" + stack.Name,
 				Health:     service.HealthState,
 				State:      service.State,
 				Labels:     make(map[string]string),
@@ -217,15 +218,15 @@ func parseAPISourcedRancherData(environments []*rancher.Environment, services []
 			}
 
 			if service.LaunchConfig == nil || service.LaunchConfig.Labels == nil {
-				log.Warnf("Rancher Service Labels are missing. Environment: %s, service: %s", environment.Name, service.Name)
+				log.Warnf("Rancher Service Labels are missing. Stack: %s, service: %s", stack.Name, service.Name)
 			} else {
 				for key, value := range service.LaunchConfig.Labels {
-					rancherData.Labels[key] = value.(string)
+					rData.Labels[key] = value.(string)
 				}
 			}
 
 			for _, container := range containers {
-				if container.Labels[labelRancherStackServiceName] == rancherData.Name &&
+				if container.Labels[labelRancherStackServiceName] == stack.Name+"/"+service.Name &&
 					containerFilter(container.Name, container.HealthState, container.State) {
 
 					if container.NetworkMode == hostNetwork {
@@ -238,14 +239,14 @@ func parseAPISourcedRancherData(environments []*rancher.Environment, services []
 						}
 
 						if len(endpoints) > 0 {
-							rancherData.Containers = append(rancherData.Containers, endpoints[0].IpAddress)
+							rData.Containers = append(rData.Containers, endpoints[0].IpAddress)
 						}
 					} else {
-						rancherData.Containers = append(rancherData.Containers, container.PrimaryIpAddress)
+						rData.Containers = append(rData.Containers, container.PrimaryIpAddress)
 					}
 				}
 			}
-			rancherDataList = append(rancherDataList, rancherData)
+			rancherDataList = append(rancherDataList, rData)
 		}
 	}
 

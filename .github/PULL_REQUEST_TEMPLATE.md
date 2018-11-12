@@ -12,12 +12,25 @@ HOW TO WRITE A GOOD PULL REQUEST?
 - Write useful descriptions and titles.
 - Address review comments in terms of additional commits.
 - Do not amend/squash existing ones unless the PR is trivial.
-- Read the contributing guide: https://github.com/containous/traefik/blob/master/.github/CONTRIBUTING.md.
+- Read the contributing guide: https://github.com/containous/traefik/blob/master/CONTRIBUTING.md.
 
 -->
 
-### Description
+### What does this PR do?
 
-<!--
-Briefly describe the pull request in a few paragraphs.
--->
+<!-- A brief description of the change being made with this pull request. -->
+
+
+### Motivation
+
+<!-- What inspired you to submit this pull request? -->
+
+
+### More
+
+- [ ] Added/updated tests
+- [ ] Added/updated documentation
+
+### Additional Notes
+
+<!-- Anything else we should know when reviewing? -->

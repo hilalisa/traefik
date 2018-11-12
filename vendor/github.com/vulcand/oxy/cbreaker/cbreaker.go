@@ -1,9 +1,9 @@
-// package cbreaker implements circuit breaker similar to  https://github.com/Netflix/Hystrix/wiki/How-it-Works
+// Package cbreaker implements circuit breaker similar to  https://github.com/Netflix/Hystrix/wiki/How-it-Works
 //
 // Vulcan circuit breaker watches the error condtion to match
 // after which it activates the fallback scenario, e.g. returns the response code
 // or redirects the request to another location
-
+//
 // Circuit breakers start in the Standby state first, observing responses and watching location metrics.
 //
 // Once the Circuit breaker condition is met, it enters the "Tripped" state, where it activates fallback scenario
@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/mailgun/timetools"
+	log "github.com/sirupsen/logrus"
 	"github.com/vulcand/oxy/memmetrics"
 	"github.com/vulcand/oxy/utils"
 )
@@ -60,8 +61,9 @@ type CircuitBreaker struct {
 	fallback http.Handler
 	next     http.Handler
 
-	log   utils.Logger
 	clock timetools.TimeProvider
+
+	log *log.Logger
 }
 
 // New creates a new CircuitBreaker middleware
@@ -75,7 +77,7 @@ func New(next http.Handler, expression string, options ...CircuitBreakerOption) 
 		fallbackDuration: defaultFallbackDuration,
 		recoveryDuration: defaultRecoveryDuration,
 		fallback:         defaultFallback,
-		log:              utils.NullLogger,
+		log:              log.StandardLogger(),
 	}
 
 	for _, s := range options {
@@ -99,7 +101,22 @@ func New(next http.Handler, expression string, options ...CircuitBreakerOption) 
 	return cb, nil
 }
 
+// Logger defines the logger the circuit breaker will use.
+//
+// It defaults to logrus.StandardLogger(), the global logger used by logrus.
+func Logger(l *log.Logger) CircuitBreakerOption {
+	return func(c *CircuitBreaker) error {
+		c.log = l
+		return nil
+	}
+}
+
 func (c *CircuitBreaker) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if c.log.Level >= log.DebugLevel {
+		logEntry := c.log.WithField("Request", utils.DumpHttpRequest(req))
+		logEntry.Debug("vulcand/oxy/circuitbreaker: begin ServeHttp on request")
+		defer logEntry.Debug("vulcand/oxy/circuitbreaker: completed ServeHttp on request")
+	}
 	if c.activateFallback(w, req) {
 		c.fallback.ServeHTTP(w, req)
 		return
@@ -107,6 +124,7 @@ func (c *CircuitBreaker) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	c.serve(w, req)
 }
 
+// Wrap sets the next handler to be called by circuit breaker handler.
 func (c *CircuitBreaker) Wrap(next http.Handler) {
 	c.next = next
 }
@@ -121,7 +139,7 @@ func (c *CircuitBreaker) activateFallback(w http.ResponseWriter, req *http.Reque
 	c.m.Lock()
 	defer c.m.Unlock()
 
-	c.log.Infof("%v is in error state", c)
+	c.log.Warnf("%v is in error state", c)
 
 	switch c.state {
 	case stateStandby:
@@ -151,12 +169,12 @@ func (c *CircuitBreaker) activateFallback(w http.ResponseWriter, req *http.Reque
 
 func (c *CircuitBreaker) serve(w http.ResponseWriter, req *http.Request) {
 	start := c.clock.UtcNow()
-	p := &utils.ProxyWriter{W: w}
+	p := utils.NewProxyWriterWithLogger(w, c.log)
 
 	c.next.ServeHTTP(p, req)
 
 	latency := c.clock.UtcNow().Sub(start)
-	c.metrics.Record(p.Code, latency)
+	c.metrics.Record(p.StatusCode(), latency)
 
 	// Note that this call is less expensive than it looks -- checkCondition only performs the real check
 	// periodically. Because of that we can afford to call it here on every single response.
@@ -192,7 +210,7 @@ func (c *CircuitBreaker) exec(s SideEffect) {
 }
 
 func (c *CircuitBreaker) setState(new cbState, until time.Time) {
-	c.log.Infof("%v setting state to %v, until %v", c, new, until)
+	c.log.Debugf("%v setting state to %v, until %v", c, new, until)
 	c.state = new
 	c.until = until
 	switch new {
@@ -225,7 +243,7 @@ func (c *CircuitBreaker) checkAndSet() {
 	c.lastCheck = c.clock.UtcNow().Add(c.checkPeriod)
 
 	if c.state == stateTripped {
-		c.log.Infof("%v skip set tripped", c)
+		c.log.Debugf("%v skip set tripped", c)
 		return
 	}
 
@@ -239,7 +257,7 @@ func (c *CircuitBreaker) checkAndSet() {
 
 func (c *CircuitBreaker) setRecovering() {
 	c.setState(stateRecovering, c.clock.UtcNow().Add(c.recoveryDuration))
-	c.rc = newRatioController(c.clock, c.recoveryDuration)
+	c.rc = newRatioController(c.clock, c.recoveryDuration, c.log)
 }
 
 // CircuitBreakerOption represents an option you can pass to New.
@@ -291,7 +309,7 @@ func OnTripped(s SideEffect) CircuitBreakerOption {
 	}
 }
 
-// OnTripped sets a SideEffect to run when entering the Standby state.
+// OnStandby sets a SideEffect to run when entering the Standby state.
 // Only one SideEffect can be set for this hook.
 func OnStandby(s SideEffect) CircuitBreakerOption {
 	return func(c *CircuitBreaker) error {
@@ -305,14 +323,6 @@ func OnStandby(s SideEffect) CircuitBreakerOption {
 func Fallback(h http.Handler) CircuitBreakerOption {
 	return func(c *CircuitBreaker) error {
 		c.fallback = h
-		return nil
-	}
-}
-
-// Logger adds logging for the CircuitBreaker.
-func Logger(l utils.Logger) CircuitBreakerOption {
-	return func(c *CircuitBreaker) error {
-		c.log = l
 		return nil
 	}
 }
@@ -349,8 +359,7 @@ const (
 
 var defaultFallback = &fallback{}
 
-type fallback struct {
-}
+type fallback struct{}
 
 func (f *fallback) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusServiceUnavailable)

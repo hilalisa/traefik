@@ -28,6 +28,24 @@ Following is the order by which Traefik tries to identify the port (the first on
 1. The port from the application's `portDefinitions` field (possibly indexed through the `traefik.portIndex` label, otherwise the first one).
 1. The port from the application's `ipAddressPerTask` field (possibly indexed through the `traefik.portIndex` label, otherwise the first one).
 
+## Applications with multiple ports
+
+Some Marathon applications may expose multiple ports. Traefik supports creating one so-called _segment_ per port using [segment labels](/configuration/backends/marathon#applications-with-multiple-ports-segment-labels).
+
+For instance, assume that a Marathon application exposes a web API on port 80 and an admin interface on port 8080. It would then be possible to make each service available by specifying the following Marathon labels:
+
+```
+traefik.web.port=80
+```
+
+```
+traefik.admin.port=8080
+```
+
+(Note that the service names `web` and `admin` can be chosen arbitrarily.)
+
+Technically, Traefik will create one pair of frontend and backend configurations for each service.
+
 ## Achieving high availability
 
 ### Scenarios
@@ -53,7 +71,7 @@ Beginning with version 1.4, Traefik respects readiness check results if the Trae
 
 !!! note
     Due to the way readiness check results are currently exposed by the Marathon API, ready tasks may be taken into rotation with a small delay.
-    It is on the order of one readiness check timeout interval (as configured on the application specifiation) and guarantees that non-ready tasks do not receive traffic prematurely.
+    It is on the order of one readiness check timeout interval (as configured on the application specification) and guarantees that non-ready tasks do not receive traffic prematurely.
 
 If readiness checks are not possible, a current mitigation strategy is to enable [retries](/configuration/commons#retry-configuration) and make sure that a sufficient number of healthy application tasks exist so that one retry will likely hit one of those.
 Apart from its probabilistic nature, the workaround comes at the price of increased latency.
@@ -112,7 +130,6 @@ As such, there is no way to handle this situation deterministically.
 Finally, Marathon health checks are not mandatory (the default is to use the task state as reported by Mesos), so requiring them for Traefik would raise the entry barrier for Marathon users.
 
 Traefik used to use the health check results as a strict requirement but moved away from it as [users reported the dramatic consequences](https://github.com/containous/traefik/issues/653).
-If health check results are known to exist, however, they will be used to signal task availability.
 
 #### Draining
 

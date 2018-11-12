@@ -2,7 +2,8 @@
 
 ## Building
 
-You need either [Docker](https://github.com/docker/docker) and `make` (Method 1), or `go` (Method 2) in order to build Traefik. For changes to its dependencies, the `glide` dependency management tool and `glide-vc` plugin are required.
+You need either [Docker](https://github.com/docker/docker) and `make` (Method 1), or `go` (Method 2) in order to build Traefik.
+For changes to its dependencies, the `dep` dependency management tool is required.
 
 ### Method 1: Using `Docker` and `Makefile`
 
@@ -12,9 +13,9 @@ You need to run the `binary` target. This will create binaries for Linux platfor
 $ make binary
 docker build -t "traefik-dev:no-more-godep-ever" -f build.Dockerfile .
 Sending build context to Docker daemon 295.3 MB
-Step 0 : FROM golang:1.9-alpine
+Step 0 : FROM golang:1.11-alpine
  ---> 8c6473912976
-Step 1 : RUN go get github.com/Masterminds/glide
+Step 1 : RUN go get github.com/golang/dep/cmd/dep
 [...]
 docker run --rm  -v "/var/run/docker.sock:/var/run/docker.sock" -it -e OS_ARCH_ARG -e OS_PLATFORM_ARG -e TESTFLAGS -v "/home/user/go/src/github.com/containous/traefik/"dist":/go/src/github.com/containous/traefik/"dist"" "traefik-dev:no-more-godep-ever" ./script/make.sh generate binary
 ---> Making bundle: generate (in .)
@@ -31,7 +32,7 @@ traefik*
 ##### Setting up your `go` environment
 
 - You need `go` v1.9+
-- It is recommended you clone Træfik into a directory like `~/go/src/github.com/containous/traefik` (This is the official golang workspace hierarchy, and will allow dependencies to resolve properly)
+- It is recommended you clone Traefik into a directory like `~/go/src/github.com/containous/traefik` (This is the official golang workspace hierarchy, and will allow dependencies to resolve properly)
 - Set your `GOPATH` and `PATH` variable to be set to `~/go` via:
 
 ```bash
@@ -55,17 +56,20 @@ GORACE=""
 ## more go env's will be listed
 ```
 
-##### Build Træfik
+##### Build Traefik
 
-Once your environment is set up and the Træfik repository cloned you can build Træfik. You need get `go-bindata` once to be able to use `go generate` command as part of the build.  The steps to build are:
+Once your environment is set up and the Traefik repository cloned you can build Traefik. You need get `go-bindata` once to be able to use `go generate` command as part of the build.  The steps to build are:
 
 ```bash
 cd ~/go/src/github.com/containous/traefik
 
 # Get go-bindata. Please note, the ellipses are required
-go get github.com/jteeuwen/go-bindata/...
+go get github.com/containous/go-bindata/...
 
 # Start build
+
+# generate
+# (required to merge non-code components into the final binary, such as the web dashboard and provider's Go templates)
 go generate
 
 # Standard go build
@@ -73,23 +77,28 @@ go build ./cmd/traefik
 # run other commands like tests
 ```
 
-You will find the Træfik executable in the `~/go/src/github.com/containous/traefik` folder as `traefik`.
+You will find the Traefik executable in the `~/go/src/github.com/containous/traefik` folder as `traefik`.
 
-### Setting up `glide` and `glide-vc` for dependency management
+### Updating the templates
 
-- Glide is not required for building; however, it is necessary to modify dependencies (i.e., add, update, or remove third-party packages)
-- Glide can be installed either via homebrew: `$ brew install glide` or via the official glide script: `$ curl https://glide.sh/get | sh`
-- The glide plugin `glide-vc` must be installed from source: `go get github.com/sgotti/glide-vc`
+If you happen to update the provider templates (in `/templates`), you need to run `go generate` to update the `autogen` package.
 
-If you want to add a dependency, use `$ glide get` to have glide put it into the vendor folder and update the glide manifest/lock files (`glide.yaml` and `glide.lock`, respectively). A following `glide-vc` run should be triggered to trim down the size of the vendor folder. The final result must be committed into VCS.
+### Setting up dependency management
 
-Care must be taken to choose the right arguments to `glide` when dealing with dependencies, or otherwise risk ending up with a broken build. For that reason, the helper script `script/glide.sh` encapsulates the gory details and conveniently calls `glide-vc` as well. Call it without parameters for basic usage instructions.
+[dep](https://github.com/golang/dep) is not required for building; however, it is necessary to modify dependencies (i.e., add, update, or remove third-party packages)
 
-Here's a full example using glide to add a new dependency:
+You need to use [dep](https://github.com/golang/dep) >= O.4.1.
+
+If you want to add a dependency, use `dep ensure -add` to have [dep](https://github.com/golang/dep) put it into the vendor folder and update the dep manifest/lock files (`Gopkg.toml` and `Gopkg.lock`, respectively).
+
+A following `make dep-prune` run should be triggered to trim down the size of the vendor folder.
+The final result must be committed into VCS.
+
+Here's a full example using dep to add a new dependency:
 
 ```bash
 # install the new main dependency github.com/foo/bar and minimize vendor size
-$ ./script/glide.sh get github.com/foo/bar
+$ dep ensure -add github.com/foo/bar
 # generate (Only required to integrate other components such as web dashboard)
 $ go generate
 # Standard go build
@@ -120,6 +129,7 @@ Test success
 ```
 
 For development purposes, you can specify which tests to run by using:
+
 ```bash
 # Run every tests in the MyTest suite
 TESTFLAGS="-check.f MyTestSuite" make test-integration
@@ -138,18 +148,49 @@ More: https://labix.org/gocheck
 
 #### Method 2: `go`
 
-- Tests can be run from the cloned directory, by `$ go test ./...` which should return `ok` similar to:
+Unit tests can be run from the cloned directory by `$ go test ./...` which should return `ok` similar to:
+
 ```
 ok      _/home/user/go/src/github/containous/traefik    0.004s
 ```
+
+Integration tests must be run from the `integration/` directory and require the `-integration` switch to be passed like this: `$ cd integration && go test -integration ./...`.
 
 ## Documentation
 
 The [documentation site](http://docs.traefik.io/) is built with [mkdocs](http://mkdocs.org/)
 
+### Building Documentation
+
+#### Method 1: `Docker` and `make`
+
+You can build the documentation and serve it locally with livereloading, using the `docs` target:
+
+```bash
+$ make docs
+docker build -t traefik-docs -f docs.Dockerfile .
+# […]
+docker run  --rm -v /home/user/go/github/containous/traefik:/mkdocs -p 8000:8000 traefik-docs mkdocs serve
+# […]
+[I 170828 20:47:48 server:283] Serving on http://0.0.0.0:8000
+[I 170828 20:47:48 handlers:60] Start watching changes
+[I 170828 20:47:48 handlers:62] Start detecting changes
+```
+
+And go to [http://127.0.0.1:8000](http://127.0.0.1:8000).
+
+If you only want to build the documentation without serving it locally, you can use the following command:
+
+```bash
+$ make docs-build
+...
+```
+
+#### Method 2: `mkdocs`
+
 First make sure you have python and pip installed
 
-```shell
+```bash
 $ python --version
 Python 2.7.2
 $ pip --version
@@ -158,29 +199,49 @@ pip 1.5.2
 
 Then install mkdocs with pip
 
-```shell
+```bash
 pip install --user -r requirements.txt
 ```
 
-To test documentation locally run `mkdocs serve` in the root directory, this should start a server locally to preview your changes.
+To build documentation locally and serve it locally,
+run `mkdocs serve` in the root directory,
+this should start a server locally to preview your changes.
 
-```shell
+```bash
 $ mkdocs serve
 INFO    -  Building documentation...
-WARNING -  Config value: 'theme'. Warning: The theme 'united' will be removed in an upcoming MkDocs release. See http://www.mkdocs.org/about/release-notes/ for more details
 INFO    -  Cleaning site directory
 [I 160505 22:31:24 server:281] Serving on http://127.0.0.1:8000
 [I 160505 22:31:24 handlers:59] Start watching changes
 [I 160505 22:31:24 handlers:61] Start detecting changes
 ```
 
+### Verify Documentation
+
+You can verify that the documentation meets some expectations, as checking for dead links, html markup validity.
+
+```bash
+$ make docs-verify
+docker build -t traefik-docs-verify ./script/docs-verify-docker-image ## Build Validator image
+...
+docker run --rm -v /home/travis/build/containous/traefik:/app traefik-docs-verify ## Check for dead links and w3c compliance
+=== Checking HTML content...
+Running ["HtmlCheck", "ImageCheck", "ScriptCheck", "LinkCheck"] on /app/site/basics/index.html on *.html...
+```
+
+If you recently changed the documentation, do not forget to clean it to have it rebuilt:
+
+```bash
+$ make docs-clean docs-verify
+...
+```
 
 ## How to Write a Good Issue
 
 Please keep in mind that the GitHub issue tracker is not intended as a general support forum, but for reporting bugs and feature requests.
 
 For end-user related support questions, refer to one of the following:
-- the Traefik community Slack channel: [![Join the chat at https://traefik.herokuapp.com](https://img.shields.io/badge/style-register-green.svg?style=social&label=Slack)](https://traefik.herokuapp.com)
+- the Traefik community Slack channel: [![Join the chat at https://slack.traefik.io](https://img.shields.io/badge/style-register-green.svg?style=social&label=Slack)](https://slack.traefik.io)
 - [Stack Overflow](https://stackoverflow.com/questions/tagged/traefik) (using the `traefik` tag)
 
 ### Title

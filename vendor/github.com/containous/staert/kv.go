@@ -1,23 +1,28 @@
 package staert
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"github.com/containous/flaeg"
-	"github.com/docker/libkv"
-	"github.com/docker/libkv/store"
-	"github.com/mitchellh/mapstructure"
+	"io"
+	"io/ioutil"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/abronan/valkeyrie"
+	"github.com/abronan/valkeyrie/store"
+	"github.com/containous/flaeg"
+	"github.com/mitchellh/mapstructure"
 )
 
 // KvSource implements Source
-// It handles all mapstructure features(Squashed Embeded Sub-Structures, Maps, Pointers)
-// It supports Slices (and maybe Arraies). They must be sorted in the KvStore like this :
+// It handles all mapstructure features(Squashed Embedded Sub-Structures, Maps, Pointers)
+// It supports Slices (and maybe Arrays). They must be sorted in the KvStore like this :
 // Key : ".../[sliceIndex]" -> Value
 type KvSource struct {
 	store.Store
@@ -26,11 +31,11 @@ type KvSource struct {
 
 // NewKvSource creates a new KvSource
 func NewKvSource(backend store.Backend, addrs []string, options *store.Config, prefix string) (*KvSource, error) {
-	store, err := libkv.NewStore(backend, addrs, options)
-	return &KvSource{Store: store, Prefix: prefix}, err
+	kvStore, err := valkeyrie.NewStore(backend, addrs, options)
+	return &KvSource{Store: kvStore, Prefix: prefix}, err
 }
 
-// Parse uses libkv and mapstructure to fill the structure
+// Parse uses valkeyrie and mapstructure to fill the structure
 func (kv *KvSource) Parse(cmd *flaeg.Command) (*flaeg.Command, error) {
 	err := kv.LoadConfig(cmd.Config)
 	if err != nil {
@@ -41,16 +46,16 @@ func (kv *KvSource) Parse(cmd *flaeg.Command) (*flaeg.Command, error) {
 
 // LoadConfig loads data from the KV Store into the config structure (given by reference)
 func (kv *KvSource) LoadConfig(config interface{}) error {
-	pairs := map[string][]byte{}
-	if err := kv.ListRecursive(kv.Prefix, pairs); err != nil {
-		return err
-	}
-	// fmt.Printf("pairs : %#v\n", pairs)
-	mapstruct, err := generateMapstructure(convertPairs(pairs), kv.Prefix)
+	pairs, err := kv.ListValuedPairWithPrefix(kv.Prefix)
 	if err != nil {
 		return err
 	}
-	// fmt.Printf("mapstruct : %#v\n", mapstruct)
+
+	mapStruct, err := generateMapstructure(convertPairs(pairs), kv.Prefix)
+	if err != nil {
+		return err
+	}
+
 	configDecoder := &mapstructure.DecoderConfig{
 		Metadata:         nil,
 		Result:           config,
@@ -61,7 +66,7 @@ func (kv *KvSource) LoadConfig(config interface{}) error {
 	if err != nil {
 		return err
 	}
-	if err := decoder.Decode(mapstruct); err != nil {
+	if err := decoder.Decode(mapStruct); err != nil {
 		return err
 	}
 	return nil
@@ -72,18 +77,18 @@ func generateMapstructure(pairs []*store.KVPair, prefix string) (map[string]inte
 	for _, p := range pairs {
 		// Trim the prefix off our key first
 		key := strings.TrimPrefix(strings.Trim(p.Key, "/"), strings.Trim(prefix, "/")+"/")
-		raw, err := processKV(key, p.Value, raw)
+		var err error
+		raw, err = processKV(key, p.Value, raw)
 		if err != nil {
 			return raw, err
 		}
-
 	}
 	return raw, nil
 }
 
 func processKV(key string, v []byte, raw map[string]interface{}) (map[string]interface{}, error) {
-	// Determine which map we're writing the value to. We split by '/'
-	// to determine any sub-maps that need to be created.
+	// Determine which map we're writing the value to.
+	// We split by '/' to determine any sub-maps that need to be created.
 	m := raw
 	children := strings.Split(key, "/")
 	if len(children) > 0 {
@@ -113,7 +118,7 @@ func decodeHook(fromType reflect.Type, toType reflect.Type, data interface{}) (i
 		object := reflect.New(toType.Elem()).Interface()
 		err := object.(encoding.TextUnmarshaler).UnmarshalText([]byte(data.(string)))
 		if err != nil {
-			return nil, fmt.Errorf("Error unmarshaling %v: %v", data, err)
+			return nil, fmt.Errorf("error unmarshaling %v: %v", data, err)
 		}
 		return object, nil
 	}
@@ -154,14 +159,30 @@ func decodeHook(fromType reflect.Type, toType reflect.Type, data interface{}) (i
 
 			return dataOutput, nil
 		} else if fromType.Kind() == reflect.String {
-			b, err := base64.StdEncoding.DecodeString(data.(string))
-			if err != nil {
-				return nil, err
-			}
-			return b, nil
+			return readCompressedData(data.(string), gzipReader, base64Reader)
 		}
 	}
 	return data, nil
+}
+
+func readCompressedData(data string, fs ...func(io.Reader) (io.Reader, error)) ([]byte, error) {
+	var err error
+	for _, f := range fs {
+		var reader io.Reader
+		reader, err = f(bytes.NewBufferString(data))
+		if err == nil {
+			return ioutil.ReadAll(reader)
+		}
+	}
+	return nil, err
+}
+
+func base64Reader(r io.Reader) (io.Reader, error) {
+	return base64.NewDecoder(base64.StdEncoding, r), nil
+}
+
+func gzipReader(r io.Reader) (io.Reader, error) {
+	return gzip.NewReader(r)
 }
 
 // StoreConfig stores the config into the KV Store
@@ -170,7 +191,7 @@ func (kv *KvSource) StoreConfig(config interface{}) error {
 	if err := collateKvRecursive(reflect.ValueOf(config), kvMap, kv.Prefix); err != nil {
 		return err
 	}
-	keys := []string{}
+	var keys []string
 	for key := range kvMap {
 		keys = append(keys, key)
 	}
@@ -198,7 +219,7 @@ func collateKvRecursive(objValue reflect.Value, kv map[string]string, key string
 	if marshaler, ok := objValue.Interface().(encoding.TextMarshaler); ok {
 		test, err := marshaler.MarshalText()
 		if err != nil {
-			return fmt.Errorf("Error marshaling key %s: %v", name, err)
+			return fmt.Errorf("error marshaling key %s: %v", name, err)
 		}
 		kv[name] = string(test)
 		return nil
@@ -252,7 +273,7 @@ func collateKvRecursive(objValue reflect.Value, kv map[string]string, key string
 	case reflect.Map:
 		for _, k := range objValue.MapKeys() {
 			if k.Kind() == reflect.Struct {
-				return errors.New("Struct as key not supported")
+				return errors.New("struct as key not supported")
 			}
 			name = key + "/" + fmt.Sprint(k)
 			if err := collateKvRecursive(objValue.MapIndex(k), kv, name); err != nil {
@@ -262,7 +283,11 @@ func collateKvRecursive(objValue reflect.Value, kv map[string]string, key string
 	case reflect.Array, reflect.Slice:
 		// Byte slices get special treatment
 		if objValue.Type().Elem().Kind() == reflect.Uint8 {
-			kv[name] = base64.StdEncoding.EncodeToString(objValue.Bytes())
+			compressedData, err := writeCompressedData(objValue.Bytes())
+			if err != nil {
+				return err
+			}
+			kv[name] = compressedData
 		} else {
 			for i := 0; i < objValue.Len(); i++ {
 				name = key + "/" + strconv.Itoa(i)
@@ -280,14 +305,33 @@ func collateKvRecursive(objValue reflect.Value, kv map[string]string, key string
 		kv[name] = fmt.Sprint(objValue)
 
 	default:
-		return fmt.Errorf("Kind %s not supported", kind.String())
+		return fmt.Errorf("kind %s not supported", kind.String())
 	}
 	return nil
 }
 
-// ListRecursive lists all key value childrens under key
+func writeCompressedData(data []byte) (string, error) {
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+
+	_, err := gzipWriter.Write(data)
+	if err != nil {
+		return "", err
+	}
+
+	err = gzipWriter.Close()
+	if err != nil {
+		return "", err
+	}
+
+	return buffer.String(), nil
+}
+
+// ListRecursive lists all key value children under key
+// Replaced by ListValuedPairWithPrefix
+// Deprecated
 func (kv *KvSource) ListRecursive(key string, pairs map[string][]byte) error {
-	pairsN1, err := kv.List(key)
+	pairsN1, err := kv.List(key, nil)
 	if err == store.ErrKeyNotFound {
 		return nil
 	}
@@ -295,7 +339,7 @@ func (kv *KvSource) ListRecursive(key string, pairs map[string][]byte) error {
 		return err
 	}
 	if len(pairsN1) == 0 {
-		pairLeaf, err := kv.Get(key)
+		pairLeaf, err := kv.Get(key, nil)
 		if err != nil {
 			return err
 		}
@@ -306,12 +350,35 @@ func (kv *KvSource) ListRecursive(key string, pairs map[string][]byte) error {
 		return nil
 	}
 	for _, p := range pairsN1 {
-		err := kv.ListRecursive(p.Key, pairs)
-		if err != nil {
-			return err
+		if p.Key != key {
+			err := kv.ListRecursive(p.Key, pairs)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// ListValuedPairWithPrefix lists all key value children under key
+func (kv *KvSource) ListValuedPairWithPrefix(key string) (map[string][]byte, error) {
+	pairs := make(map[string][]byte)
+
+	pairsN1, err := kv.List(key, nil)
+	if err == store.ErrKeyNotFound {
+		return pairs, nil
+	}
+	if err != nil {
+		return pairs, err
+	}
+
+	for _, p := range pairsN1 {
+		if len(p.Value) > 0 {
+			pairs[p.Key] = p.Value
+		}
+	}
+
+	return pairs, nil
 }
 
 func convertPairs(pairs map[string][]byte) []*store.KVPair {

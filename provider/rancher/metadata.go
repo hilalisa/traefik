@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/cenk/backoff"
 	"github.com/containous/traefik/job"
 	"github.com/containous/traefik/log"
 	"github.com/containous/traefik/safe"
 	"github.com/containous/traefik/types"
+	"github.com/sirupsen/logrus"
 
 	rancher "github.com/rancher/go-rancher-metadata/metadata"
 )
@@ -22,16 +22,14 @@ type MetadataConfiguration struct {
 	Prefix       string `description:"Prefix used for accessing the Rancher metadata service"`
 }
 
-func (p *Provider) metadataProvide(configurationChan chan<- types.ConfigMessage, pool *safe.Pool, constraints types.Constraints) error {
-	p.Constraints = append(p.Constraints, constraints...)
-
+func (p *Provider) metadataProvide(configurationChan chan<- types.ConfigMessage, pool *safe.Pool) error {
 	metadataServiceURL := fmt.Sprintf("http://rancher-metadata.rancher.internal/%s", p.Metadata.Prefix)
 
 	safe.Go(func() {
 		operation := func() error {
 			client, err := rancher.NewClientAndWait(metadataServiceURL)
 			if err != nil {
-				log.Errorln("Failed to create Rancher metadata service client: %s", err)
+				log.Errorf("Failed to create Rancher metadata service client: %v", err)
 				return err
 			}
 
@@ -40,12 +38,12 @@ func (p *Provider) metadataProvide(configurationChan chan<- types.ConfigMessage,
 
 				stacks, err := client.GetStacks()
 				if err != nil {
-					log.Errorf("Failed to query Rancher metadata service: %s", err)
+					log.Errorf("Failed to query Rancher metadata service: %v", err)
 					return
 				}
 
 				rancherData := parseMetadataSourcedRancherData(stacks)
-				configuration := p.loadRancherConfig(rancherData)
+				configuration := p.buildConfiguration(rancherData)
 				configurationChan <- types.ConfigMessage{
 					ProviderName:  "rancher",
 					Configuration: configuration,
@@ -85,7 +83,7 @@ func (p *Provider) intervalPoll(client rancher.Client, updateConfiguration func(
 	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ticker := time.NewTicker(time.Duration(p.RefreshSeconds))
+	ticker := time.NewTicker(time.Second * time.Duration(p.RefreshSeconds))
 	defer ticker.Stop()
 
 	var version string
@@ -111,7 +109,7 @@ func (p *Provider) longPoll(client rancher.Client, updateConfiguration func(stri
 
 	// Holds the connection until there is either a change in the metadata
 	// repository or `p.RefreshSeconds` has elapsed. Long polling should be
-	// favoured for the most accurate configuration updates.
+	// favored for the most accurate configuration updates.
 	safe.Go(func() {
 		client.OnChange(p.RefreshSeconds, updateConfiguration)
 	})
@@ -129,7 +127,7 @@ func parseMetadataSourcedRancherData(stacks []rancher.Stack) (rancherDataList []
 			}
 
 			rancherDataList = append(rancherDataList, rancherData{
-				Name:       stack.Name + "/" + service.Name,
+				Name:       service.Name + "/" + stack.Name,
 				State:      service.State,
 				Labels:     service.Labels,
 				Containers: containerIPAddresses,

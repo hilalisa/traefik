@@ -6,9 +6,7 @@ logLevel = "DEBUG"
   [entryPoints.http]
   address = ":8000"
 
-
-[web]
-  address = ":8080"
+[api]
 
 [file]
 
@@ -16,9 +14,11 @@ logLevel = "DEBUG"
   [backends.backend1]
     [backends.backend1.servers.server1]
     url = "{{ .WebsocketServer }}"
+    weight = 1
 
 [frontends]
   [frontends.frontend1]
   backend = "backend1"
+  passHostHeader = true
     [frontends.frontend1.routes.test_1]
-    rule = "Path:/ws"
+    rule = "PathPrefix:/ws"

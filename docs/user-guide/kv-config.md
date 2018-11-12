@@ -1,10 +1,10 @@
 # Key-value store configuration
 
-Both [static global configuration](/user-guide/kv-config/#static-configuration-in-key-value-store) and [dynamic](/user-guide/kv-config/#dynamic-configuration-in-key-value-store) configuration can be sorted in a Key-value store.
+Both [static global configuration](/user-guide/kv-config/#static-configuration-in-key-value-store) and [dynamic](/user-guide/kv-config/#dynamic-configuration-in-key-value-store) configuration can be stored in a Key-value store.
 
-This section explains how to launch Træfik using a configuration loaded from a Key-value store.
+This section explains how to launch Traefik using a configuration loaded from a Key-value store.
 
-Træfik supports several Key-value stores:
+Traefik supports several Key-value stores:
 
 - [Consul](https://consul.io)
 - [etcd](https://coreos.com/etcd/)
@@ -20,11 +20,11 @@ We will see the steps to set it up with an easy example.
 
 ### docker-compose file for Consul
 
-The Træfik global configuration will be getted from a [Consul](https://consul.io) store.
+The Traefik global configuration will be retrieved from a [Consul](https://consul.io) store.
 
 First we have to launch Consul in a container.
 
-The [docker-compose file](https://docs.docker.com/compose/compose-file/) allows us to launch Consul and four instances of the trivial app [emilevauge/whoamI](https://github.com/emilevauge/whoamI) :
+The [docker-compose file](https://docs.docker.com/compose/compose-file/) allows us to launch Consul and four instances of the trivial app [containous/whoami](https://github.com/containous/whoami) :
 
 ```yaml
 consul:
@@ -42,25 +42,25 @@ consul:
     - "8302/udp"
 
 whoami1:
-  image: emilevauge/whoami
+  image: containous/whoami
 
 whoami2:
-  image: emilevauge/whoami
+  image: containous/whoami
 
 whoami3:
-  image: emilevauge/whoami
+  image: containous/whoami
 
 whoami4:
-  image: emilevauge/whoami
+  image: containous/whoami
 ```
 
 ### Upload the configuration in the Key-value store
 
-We should now fill the store with the Træfik global configuration, as we do with a [TOML file configuration](/toml).  
+We should now fill the store with the Traefik global configuration.  
 To do that, we can send the Key-value pairs via [curl commands](https://www.consul.io/intro/getting-started/kv.html) or via the [Web UI](https://www.consul.io/intro/getting-started/ui.html).
 
-Fortunately, Træfik allows automation of this process using the `storeconfig` subcommand.  
-Please refer to the [store Træfik configuration](/user-guide/kv-config/#store-configuration-in-key-value-store) section to get documentation on it.
+Fortunately, Traefik allows automation of this process using the `storeconfig` subcommand.  
+Please refer to the [store Traefik configuration](/user-guide/kv-config/#store-configuration-in-key-value-store) section to get documentation on it.
 
 Here is the toml configuration we would like to store in the Key-value Store  :
 
@@ -70,29 +70,35 @@ logLevel = "DEBUG"
 defaultEntryPoints = ["http", "https"]
 
 [entryPoints]
+  [entryPoints.api]
+    address = ":8081"
   [entryPoints.http]
   address = ":80"
   [entryPoints.https]
   address = ":443"
+
     [entryPoints.https.tls]
       [[entryPoints.https.tls.certificates]]
-      CertFile = "integration/fixtures/https/snitest.com.cert"
-      KeyFile = "integration/fixtures/https/snitest.com.key"
+      certFile = "integration/fixtures/https/snitest.com.cert"
+      keyFile = "integration/fixtures/https/snitest.com.key"
       [[entryPoints.https.tls.certificates]]
-      CertFile = """-----BEGIN CERTIFICATE-----
+      certFile = """-----BEGIN CERTIFICATE-----
                       <cert file content>
                       -----END CERTIFICATE-----"""
-      KeyFile = """-----BEGIN CERTIFICATE-----
+      keyFile = """-----BEGIN PRIVATE KEY-----
                       <key file content>
-                      -----END CERTIFICATE-----"""
+                      -----END PRIVATE KEY-----"""
+    [entryPoints.other-https]
+    address = ":4443"
+      [entryPoints.other-https.tls]
 
 [consul]
   endpoint = "127.0.0.1:8500"
   watch = true
   prefix = "traefik"
 
-[web]
-  address = ":8081"
+[api]
+  entrypoint = "api"
 ```
 
 And there, the same global configuration in the Key-value Store (using `prefix = "traefik"`):
@@ -102,16 +108,18 @@ And there, the same global configuration in the Key-value Store (using `prefix =
 | `/traefik/loglevel`                                       | `DEBUG`                                                       |
 | `/traefik/defaultentrypoints/0`                           | `http`                                                        |
 | `/traefik/defaultentrypoints/1`                           | `https`                                                       |
+| `/traefik/entrypoints/api/address`                        | `:8081`                                                       |
 | `/traefik/entrypoints/http/address`                       | `:80`                                                         |
 | `/traefik/entrypoints/https/address`                      | `:443`                                                        |
 | `/traefik/entrypoints/https/tls/certificates/0/certfile`  | `integration/fixtures/https/snitest.com.cert`                 |
 | `/traefik/entrypoints/https/tls/certificates/0/keyfile`   | `integration/fixtures/https/snitest.com.key`                  |
 | `/traefik/entrypoints/https/tls/certificates/1/certfile`  | `--BEGIN CERTIFICATE--<cert file content>--END CERTIFICATE--` |
 | `/traefik/entrypoints/https/tls/certificates/1/keyfile`   | `--BEGIN CERTIFICATE--<key file content>--END CERTIFICATE--`  |
+| `/traefik/entrypoints/other-https/address`                | `:4443`                                                       |
 | `/traefik/consul/endpoint`                                | `127.0.0.1:8500`                                              |
 | `/traefik/consul/watch`                                   | `true`                                                        |
 | `/traefik/consul/prefix`                                  | `traefik`                                                     |
-| `/traefik/web/address`                                    | `:8081`                                                       |
+| `/traefik/api/entrypoint`                                 | `api`                                                         |
 
 In case you are setting key values manually:
 
@@ -120,11 +128,11 @@ In case you are setting key values manually:
 
 Note that we can either give path to certificate file or directly the file content itself.
 
-### Launch Træfik
+### Launch Traefik
 
-We will now launch Træfik in a container.
+We will now launch Traefik in a container.
 
-We use CLI flags to setup the connection between Træfik and Consul.
+We use CLI flags to setup the connection between Traefik and Consul.
 All the rest of the global configuration is stored in Consul.
 
 Here is the [docker-compose file](https://docs.docker.com/compose/compose-file/) :
@@ -148,6 +156,37 @@ This variable must be initialized with the ACL token value.
 
 If Traefik is launched into a Docker container, the variable `CONSUL_HTTP_TOKEN` can be initialized with the `-e` Docker option : `-e "CONSUL_HTTP_TOKEN=[consul-acl-token-value]"`
 
+If a Consul ACL is used to restrict Traefik read/write access, one of the following configurations is needed.
+
+- HCL format :
+
+```
+    key "traefik" {
+        policy = "write"
+    },
+
+    session "" {
+        policy = "write"
+    }
+```
+
+- JSON format :
+
+```json
+{
+    "key": {
+        "traefik": {
+          "policy": "write"
+        }
+    },
+    "session": {
+        "": {
+        "policy": "write"
+        }
+    }
+}
+```
+
 ### TLS support
 
 To connect to a Consul endpoint using SSL, simply specify `https://` in the `consul.endpoint` property
@@ -160,7 +199,7 @@ So far, only [Consul](https://consul.io) and [etcd](https://coreos.com/etcd/) su
 
 To set it up, we should enable [consul security](https://www.consul.io/docs/internals/security.html) (or [etcd security](https://coreos.com/etcd/docs/latest/security.html)).
 
-Then, we have to provide CA, Cert and Key to Træfik using `consul` flags :
+Then, we have to provide CA, Cert and Key to Traefik using `consul` flags :
 
 - `--consul.tls`
 - `--consul.tls.ca=path/to/the/file`
@@ -181,10 +220,10 @@ Remember the command `traefik --help` to display the updated list of flags.
 
 ## Dynamic configuration in Key-value store
 
-Following our example, we will provide backends/frontends rules to Træfik.
+Following our example, we will provide backends/frontends  rules and HTTPS certificates to Traefik.
 
 !!! note
-    This section is independent of the way Træfik got its static configuration.
+    This section is independent of the way Traefik got its static configuration.
     It means that the static configuration can either come from the same Key-value store or from any other sources.
 
 ### Key-value storage structure
@@ -227,6 +266,11 @@ Here is the toml configuration we would like to store in the store :
   backend = "backend1"
   passHostHeader = true
   priority = 10
+      [frontends.frontend2.auth.basic]
+      users = [
+        "test:$apr1$H6uskkkW$IgXLP6ewTrSuBkTrqE8wj/",
+        "test2:$apr1$d9hr9HBB$4HxwgUir3HP4EsggP/QNo0",
+      ]
   entrypoints = ["https"] # overrides defaultEntryPoints
     [frontends.frontend2.routes.test_1]
     rule = "Host:{subdomain:[a-z]+}.localhost"
@@ -234,6 +278,21 @@ Here is the toml configuration we would like to store in the store :
   entrypoints = ["http", "https"] # overrides defaultEntryPoints
   backend = "backend2"
   rule = "Path:/test"
+
+[[tls]]
+  [tls.certificate]
+    certFile = "path/to/your.cert"
+    keyFile = "path/to/your.key"
+
+[[tls]]
+  entryPoints = ["https","other-https"]
+  [tls.certificate]
+    certFile = """-----BEGIN CERTIFICATE-----
+                      <cert file content>
+                      -----END CERTIFICATE-----"""
+    keyFile = """-----BEGIN CERTIFICATE-----
+                      <key file content>
+                      -----END CERTIFICATE-----"""
 ```
 
 And there, the same dynamic configuration in a KV Store (using `prefix = "traefik"`):
@@ -271,27 +330,47 @@ And there, the same dynamic configuration in a KV Store (using `prefix = "traefi
 
 - frontend 2
 
-| Key                                                | Value              |
-|----------------------------------------------------|--------------------|
-| `/traefik/frontends/frontend2/backend`             | `backend1`         |
-| `/traefik/frontends/frontend2/passHostHeader`      | `true`             |
-| `/traefik/frontends/frontend2/priority`            | `10`               |
-| `/traefik/frontends/frontend2/entrypoints`         | `http,https`       |
-| `/traefik/frontends/frontend2/routes/test_2/rule`  | `PathPrefix:/test` |
+| Key                                                | Value                                         |
+|----------------------------------------------------|-----------------------------------------------|
+| `/traefik/frontends/frontend2/backend`             | `backend1`                                    |
+| `/traefik/frontends/frontend2/passhostheader`      | `true`                                        |
+| `/traefik/frontends/frontend2/priority`            | `10`                                          |
+| `/traefik/frontends/frontend2/auth/basic/users/0`  | `test:$apr1$H6uskkkW$IgXLP6ewTrSuBkTrqE8wj/`  |
+| `/traefik/frontends/frontend2/auth/basic/users/1`  | `test2:$apr1$d9hr9HBB$4HxwgUir3HP4EsggP/QNo0` |
+| `/traefik/frontends/frontend2/entrypoints`         | `http,https`                                  |
+| `/traefik/frontends/frontend2/routes/test_2/rule`  | `PathPrefix:/test`                            |
+
+- certificate 1
+
+| Key                                   | Value              |
+|---------------------------------------|--------------------|
+| `/traefik/tls/1/certificate/certfile` | `path/to/your.cert`|
+| `/traefik/tls/1/certificate/keyfile`  | `path/to/your.key` |
+
+!!! note
+    As `/traefik/tls/1/entrypoints` is not defined, the certificate will be attached to all `defaulEntryPoints` with a TLS configuration (in the example, the entryPoint `https`)
+
+- certificate 2
+
+| Key                                   | Value                 |
+|---------------------------------------|-----------------------|
+| `/traefik/tls/2/entrypoints`          | `https,other-https`   |
+| `/traefik/tls/2/certificate/certfile` | `<cert file content>` |
+| `/traefik/tls/2/certificate/keyfile`  | `<key file content>`  |
 
 ### Atomic configuration changes
 
-Træfik can watch the backends/frontends configuration changes and generate its configuration automatically.
+Traefik can watch the backends/frontends configuration changes and generate its configuration automatically.
 
 !!! note
-    Only backends/frontends rules are dynamic, the rest of the Træfik configuration stay static.
+    Only backends/frontends rules are dynamic, the rest of the Traefik configuration stay static.
 
 The [Etcd](https://github.com/coreos/etcd/issues/860) and [Consul](https://github.com/hashicorp/consul/issues/886) backends do not support updating multiple keys atomically.  
-As a result, it may be possible for Træfik to read an intermediate configuration state despite judicious use of the `--providersThrottleDuration` flag.  
-To solve this problem, Træfik supports a special key called `/traefik/alias`.
-If set, Træfik use the value as an alternative key prefix.
+As a result, it may be possible for Traefik to read an intermediate configuration state despite judicious use of the `--providersThrottleDuration` flag.  
+To solve this problem, Traefik supports a special key called `/traefik/alias`.
+If set, Traefik use the value as an alternative key prefix.
 
-Given the key structure below, Træfik will use the `http://172.17.0.2:80` as its only backend (frontend keys have been omitted for brevity).
+Given the key structure below, Traefik will use the `http://172.17.0.2:80` as its only backend (frontend keys have been omitted for brevity).
 
 | Key                                                                     | Value                       |
 |-------------------------------------------------------------------------|-----------------------------|
@@ -309,9 +388,9 @@ Here, although the `/traefik_configurations/2/...` keys have been set, the old c
 | `/traefik_configurations/1/backends/backend1/servers/server1/url`       | `http://172.17.0.2:80`      |
 | `/traefik_configurations/1/backends/backend1/servers/server1/weight`    | `10`                        |
 | `/traefik_configurations/2/backends/backend1/servers/server1/url`       | `http://172.17.0.2:80`      |
-| `/traefik_configurations/2/backends/backend1/servers/server1/weight`    | `5`                        |
+| `/traefik_configurations/2/backends/backend1/servers/server1/weight`    | `5`                         |
 | `/traefik_configurations/2/backends/backend1/servers/server2/url`       | `http://172.17.0.3:80`      |
-| `/traefik_configurations/2/backends/backend1/servers/server2/weight`    | `5`                        |
+| `/traefik_configurations/2/backends/backend1/servers/server2/weight`    | `5`                         |
 
 Once the `/traefik/alias` key is updated, the new `/traefik_configurations/2` configuration becomes active atomically.
 
@@ -323,27 +402,30 @@ Here, we have a 50% balance between the `http://172.17.0.3:80` and the `http://1
 | `/traefik_configurations/1/backends/backend1/servers/server1/url`       | `http://172.17.0.2:80`      |
 | `/traefik_configurations/1/backends/backend1/servers/server1/weight`    | `10`                        |
 | `/traefik_configurations/2/backends/backend1/servers/server1/url`       | `http://172.17.0.3:80`      |
-| `/traefik_configurations/2/backends/backend1/servers/server1/weight`    | `5`                        |
+| `/traefik_configurations/2/backends/backend1/servers/server1/weight`    | `5`                         |
 | `/traefik_configurations/2/backends/backend1/servers/server2/url`       | `http://172.17.0.4:80`      |
-| `/traefik_configurations/2/backends/backend1/servers/server2/weight`    | `5`                        |
+| `/traefik_configurations/2/backends/backend1/servers/server2/weight`    | `5`                         |
 
 !!! note
-    Træfik *will not watch for key changes in the `/traefik_configurations` prefix*. It will only watch for changes in the `/traefik/alias`.  
+    Traefik *will not watch for key changes in the `/traefik_configurations` prefix*. It will only watch for changes in the `/traefik/alias`.  
     Further, if the `/traefik/alias` key is set, all other configuration with `/traefik/backends` or `/traefik/frontends` prefix are ignored.
 
 ## Store configuration in Key-value store
 
 !!! note
-    Don't forget to [setup the connection between Træfik and Key-value store](/user-guide/kv-config/#launch-trfk).
+    Don't forget to [setup the connection between Traefik and Key-value store](/user-guide/kv-config/#launch-traefik).
 
-The static Træfik configuration in a key-value store can be automatically created and updated, using the [`storeconfig` subcommand](/basics/#commands).
+The static Traefik configuration in a key-value store can be automatically created and updated, using the [`storeconfig` subcommand](/basics/#commands).
 
 ```bash
 traefik storeconfig [flags] ...
 ```
 This command is here only to automate the [process which upload the configuration into the Key-value store](/user-guide/kv-config/#upload-the-configuration-in-the-key-value-store).
-Træfik will not start but the [static configuration](/basics/#static-trfk-configuration) will be uploaded into the Key-value store.  
+Traefik will not start but the [static configuration](/basics/#static-traefik-configuration) will be uploaded into the Key-value store.  
+
 If you configured ACME (Let's Encrypt), your registration account and your certificates will also be uploaded.
+
+If you configured a file provider `[file]`, all your dynamic configuration (backends, frontends...) will be uploaded to the Key-value store.
 
 To upload your ACME certificates to the KV store, get your Traefik TOML file and add the new `storage` option in the `acme` section:
 
@@ -359,4 +441,4 @@ Then remove the line `storageFile = "acme.json"` from your TOML config file.
 
 That's it!
 
-![](https://i.giphy.com/ujUdrdpX7Ok5W.gif)
+![GIF Magica](https://i.giphy.com/ujUdrdpX7Ok5W.gif)

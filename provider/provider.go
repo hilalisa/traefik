@@ -9,7 +9,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/Masterminds/sprig"
-	"github.com/containous/traefik/autogen"
+	"github.com/containous/traefik/autogen/gentemplates"
 	"github.com/containous/traefik/log"
 	"github.com/containous/traefik/safe"
 	"github.com/containous/traefik/types"
@@ -19,22 +19,29 @@ import (
 type Provider interface {
 	// Provide allows the provider to provide configurations to traefik
 	// using the given configuration channel.
-	Provide(configurationChan chan<- types.ConfigMessage, pool *safe.Pool, constraints types.Constraints) error
+	Provide(configurationChan chan<- types.ConfigMessage, pool *safe.Pool) error
+	Init(constraints types.Constraints) error
 }
 
 // BaseProvider should be inherited by providers
 type BaseProvider struct {
-	Watch                     bool              `description:"Watch provider"`
-	Filename                  string            `description:"Override default configuration template. For advanced users :)"`
-	Constraints               types.Constraints `description:"Filter services by constraint, matching with Traefik tags."`
-	Trace                     bool              `description:"Display additional provider logs (if available)."`
-	DebugLogGeneratedTemplate bool              `description:"Enable debug logging of generated configuration template."`
+	Watch                     bool              `description:"Watch provider" export:"true"`
+	Filename                  string            `description:"Override default configuration template. For advanced users :)" export:"true"`
+	Constraints               types.Constraints `description:"Filter services by constraint, matching with Traefik tags." export:"true"`
+	Trace                     bool              `description:"Display additional provider logs (if available)." export:"true"`
+	DebugLogGeneratedTemplate bool              `description:"Enable debug logging of generated configuration template." export:"true"`
 }
 
-// MatchConstraints must match with EVERY single contraint
+// Init for compatibility reason the BaseProvider implements an empty Init
+func (p *BaseProvider) Init(constraints types.Constraints) error {
+	p.Constraints = append(p.Constraints, constraints...)
+	return nil
+}
+
+// MatchConstraints must match with EVERY single constraint
 // returns first constraint that do not match or nil
 func (p *BaseProvider) MatchConstraints(tags []string) (bool, *types.Constraint) {
-	// if there is no tags and no contraints, filtering is disabled
+	// if there is no tags and no constraints, filtering is disabled
 	if len(tags) == 0 && len(p.Constraints) == 0 {
 		return true, nil
 	}
@@ -50,14 +57,17 @@ func (p *BaseProvider) MatchConstraints(tags []string) (bool, *types.Constraint)
 	return true, nil
 }
 
-// GetConfiguration return the provider configuration using templating
-func (p *BaseProvider) GetConfiguration(defaultTemplateFile string, funcMap template.FuncMap, templateObjects interface{}) (*types.Configuration, error) {
-	var (
-		buf []byte
-		err error
-	)
-	configuration := new(types.Configuration)
+// GetConfiguration return the provider configuration from default template (file or content) or overrode template file
+func (p *BaseProvider) GetConfiguration(defaultTemplate string, funcMap template.FuncMap, templateObjects interface{}) (*types.Configuration, error) {
+	tmplContent, err := p.getTemplateContent(defaultTemplate)
+	if err != nil {
+		return nil, err
+	}
+	return p.CreateConfiguration(tmplContent, funcMap, templateObjects)
+}
 
+// CreateConfiguration create a provider configuration from content using templating
+func (p *BaseProvider) CreateConfiguration(tmplContent string, funcMap template.FuncMap, templateObjects interface{}) (*types.Configuration, error) {
 	var defaultFuncMap = sprig.TxtFuncMap()
 	// tolower is deprecated in favor of sprig's lower function
 	defaultFuncMap["tolower"] = strings.ToLower
@@ -68,18 +78,8 @@ func (p *BaseProvider) GetConfiguration(defaultTemplateFile string, funcMap temp
 	}
 
 	tmpl := template.New(p.Filename).Funcs(defaultFuncMap)
-	if len(p.Filename) > 0 {
-		buf, err = ioutil.ReadFile(p.Filename)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		buf, err = autogen.Asset(defaultTemplateFile)
-		if err != nil {
-			return nil, err
-		}
-	}
-	_, err = tmpl.Parse(string(buf))
+
+	_, err := tmpl.Parse(tmplContent)
 	if err != nil {
 		return nil, err
 	}
@@ -92,12 +92,39 @@ func (p *BaseProvider) GetConfiguration(defaultTemplateFile string, funcMap temp
 
 	var renderedTemplate = buffer.String()
 	if p.DebugLogGeneratedTemplate {
-		log.Debugf("Rendering results of %s:\n%s", defaultTemplateFile, renderedTemplate)
+		log.Debugf("Template content: %s", tmplContent)
+		log.Debugf("Rendering results: %s", renderedTemplate)
 	}
-	if _, err := toml.Decode(renderedTemplate, configuration); err != nil {
+	return p.DecodeConfiguration(renderedTemplate)
+}
+
+// DecodeConfiguration Decode a *types.Configuration from a content
+func (p *BaseProvider) DecodeConfiguration(content string) (*types.Configuration, error) {
+	configuration := new(types.Configuration)
+	if _, err := toml.Decode(content, configuration); err != nil {
 		return nil, err
 	}
 	return configuration, nil
+}
+
+func (p *BaseProvider) getTemplateContent(defaultTemplateFile string) (string, error) {
+	if len(p.Filename) > 0 {
+		buf, err := ioutil.ReadFile(p.Filename)
+		if err != nil {
+			return "", err
+		}
+		return string(buf), nil
+	}
+
+	if strings.HasSuffix(defaultTemplateFile, ".tmpl") {
+		buf, err := gentemplates.Asset(defaultTemplateFile)
+		if err != nil {
+			return "", err
+		}
+		return string(buf), nil
+	}
+
+	return defaultTemplateFile, nil
 }
 
 func split(sep, s string) []string {
@@ -105,6 +132,7 @@ func split(sep, s string) []string {
 }
 
 // Normalize transform a string that work with the rest of traefik
+// Replace '.' with '-' in quoted keys because of this issue https://github.com/BurntSushi/toml/issues/78
 func Normalize(name string) string {
 	fargs := func(c rune) bool {
 		return !unicode.IsLetter(c) && !unicode.IsNumber(c)

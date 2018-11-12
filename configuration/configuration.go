@@ -1,19 +1,24 @@
 package configuration
 
 import (
-	"crypto/tls"
 	"fmt"
-	"io/ioutil"
-	"os"
-	"regexp"
 	"strings"
 	"time"
 
-	"github.com/containous/flaeg"
+	"github.com/containous/flaeg/parse"
+	"github.com/containous/traefik-extra-service-fabric"
 	"github.com/containous/traefik/acme"
+	"github.com/containous/traefik/api"
 	"github.com/containous/traefik/log"
+	"github.com/containous/traefik/middlewares/tracing"
+	"github.com/containous/traefik/middlewares/tracing/datadog"
+	"github.com/containous/traefik/middlewares/tracing/jaeger"
+	"github.com/containous/traefik/middlewares/tracing/zipkin"
+	"github.com/containous/traefik/ping"
+	acmeprovider "github.com/containous/traefik/provider/acme"
 	"github.com/containous/traefik/provider/boltdb"
 	"github.com/containous/traefik/provider/consul"
+	"github.com/containous/traefik/provider/consulcatalog"
 	"github.com/containous/traefik/provider/docker"
 	"github.com/containous/traefik/provider/dynamodb"
 	"github.com/containous/traefik/provider/ecs"
@@ -24,14 +29,23 @@ import (
 	"github.com/containous/traefik/provider/marathon"
 	"github.com/containous/traefik/provider/mesos"
 	"github.com/containous/traefik/provider/rancher"
-	"github.com/containous/traefik/provider/web"
+	"github.com/containous/traefik/provider/rest"
 	"github.com/containous/traefik/provider/zk"
+	"github.com/containous/traefik/tls"
 	"github.com/containous/traefik/types"
+	"github.com/pkg/errors"
+	lego "github.com/xenolf/lego/acme"
 )
 
 const (
+	// DefaultInternalEntryPointName the name of the default internal entry point
+	DefaultInternalEntryPointName = "traefik"
+
 	// DefaultHealthCheckInterval is the default health check interval.
 	DefaultHealthCheckInterval = 30 * time.Second
+
+	// DefaultHealthCheckTimeout is the default health check request timeout.
+	DefaultHealthCheckTimeout = 5 * time.Second
 
 	// DefaultDialTimeout when connecting to a backend server.
 	DefaultDialTimeout = 30 * time.Second
@@ -42,68 +56,94 @@ const (
 	// DefaultGraceTimeout controls how long Traefik serves pending requests
 	// prior to shutting down.
 	DefaultGraceTimeout = 10 * time.Second
+
+	// DefaultAcmeCAServer is the default ACME API endpoint
+	DefaultAcmeCAServer = "https://acme-v02.api.letsencrypt.org/directory"
 )
 
 // GlobalConfiguration holds global configuration (with providers, etc.).
 // It's populated from the traefik configuration file passed as an argument to the binary.
 type GlobalConfiguration struct {
-	LifeCycle                 *LifeCycle              `description:"Timeouts influencing the server life cycle"`
-	GraceTimeOut              flaeg.Duration          `short:"g" description:"(Deprecated) Duration to give active requests a chance to finish before Traefik stops"` // Deprecated
-	Debug                     bool                    `short:"d" description:"Enable debug mode"`
-	CheckNewVersion           bool                    `description:"Periodically check if a new version has been released"`
-	AccessLogsFile            string                  `description:"(Deprecated) Access logs file"` // Deprecated
-	AccessLog                 *types.AccessLog        `description:"Access log settings"`
-	TraefikLogsFile           string                  `description:"(Deprecated) Traefik logs file. Stdout is used when omitted or empty"` // Deprecated
-	TraefikLog                *types.TraefikLog       `description:"Traefik log settings"`
-	LogLevel                  string                  `short:"l" description:"Log level"`
-	EntryPoints               EntryPoints             `description:"Entrypoints definition using format: --entryPoints='Name:http Address::8000 Redirect.EntryPoint:https' --entryPoints='Name:https Address::4442 TLS:tests/traefik.crt,tests/traefik.key;prod/traefik.crt,prod/traefik.key'"`
-	Cluster                   *types.Cluster          `description:"Enable clustering"`
-	Constraints               types.Constraints       `description:"Filter services by constraint, matching with service tags"`
-	ACME                      *acme.ACME              `description:"Enable ACME (Let's Encrypt): automatic SSL"`
-	DefaultEntryPoints        DefaultEntryPoints      `description:"Entrypoints to be used by frontends that do not specify any entrypoint"`
-	ProvidersThrottleDuration flaeg.Duration          `description:"Backends throttle duration: minimum duration between 2 events from providers before applying a new configuration. It avoids unnecessary reloads if multiples events are sent in a short amount of time."`
-	MaxIdleConnsPerHost       int                     `description:"If non-zero, controls the maximum idle (keep-alive) to keep per-host.  If zero, DefaultMaxIdleConnsPerHost is used"`
-	IdleTimeout               flaeg.Duration          `description:"(Deprecated) maximum amount of time an idle (keep-alive) connection will remain idle before closing itself."` // Deprecated
-	InsecureSkipVerify        bool                    `description:"Disable SSL certificate verification"`
-	RootCAs                   RootCAs                 `description:"Add cert file for self-signed certicate"`
-	Retry                     *Retry                  `description:"Enable retry sending request if network error"`
-	HealthCheck               *HealthCheckConfig      `description:"Health check parameters"`
-	RespondingTimeouts        *RespondingTimeouts     `description:"Timeouts for incoming requests to the Traefik instance"`
-	ForwardingTimeouts        *ForwardingTimeouts     `description:"Timeouts for requests forwarded to the backend servers"`
-	Docker                    *docker.Provider        `description:"Enable Docker backend with default settings"`
-	File                      *file.Provider          `description:"Enable File backend with default settings"`
-	Web                       *web.Provider           `description:"Enable Web backend with default settings"`
-	Marathon                  *marathon.Provider      `description:"Enable Marathon backend with default settings"`
-	Consul                    *consul.Provider        `description:"Enable Consul backend with default settings"`
-	ConsulCatalog             *consul.CatalogProvider `description:"Enable Consul catalog backend with default settings"`
-	Etcd                      *etcd.Provider          `description:"Enable Etcd backend with default settings"`
-	Zookeeper                 *zk.Provider            `description:"Enable Zookeeper backend with default settings"`
-	Boltdb                    *boltdb.Provider        `description:"Enable Boltdb backend with default settings"`
-	Kubernetes                *kubernetes.Provider    `description:"Enable Kubernetes backend with default settings"`
-	Mesos                     *mesos.Provider         `description:"Enable Mesos backend with default settings"`
-	Eureka                    *eureka.Provider        `description:"Enable Eureka backend with default settings"`
-	ECS                       *ecs.Provider           `description:"Enable ECS backend with default settings"`
-	Rancher                   *rancher.Provider       `description:"Enable Rancher backend with default settings"`
-	DynamoDB                  *dynamodb.Provider      `description:"Enable DynamoDB backend with default settings"`
+	LifeCycle                 *LifeCycle        `description:"Timeouts influencing the server life cycle" export:"true"`
+	Debug                     bool              `short:"d" description:"Enable debug mode" export:"true"`
+	CheckNewVersion           bool              `description:"Periodically check if a new version has been released" export:"true"`
+	SendAnonymousUsage        bool              `description:"send periodically anonymous usage statistics" export:"true"`
+	AccessLog                 *types.AccessLog  `description:"Access log settings" export:"true"`
+	TraefikLog                *types.TraefikLog `description:"Traefik log settings" export:"true"`
+	Tracing                   *tracing.Tracing  `description:"OpenTracing configuration" export:"true"`
+	LogLevel                  string            `short:"l" description:"Log level" export:"true"`
+	EntryPoints               EntryPoints       `description:"Entrypoints definition using format: --entryPoints='Name:http Address::8000 Redirect.EntryPoint:https' --entryPoints='Name:https Address::4442 TLS:tests/traefik.crt,tests/traefik.key;prod/traefik.crt,prod/traefik.key'" export:"true"`
+	Cluster                   *types.Cluster
+	Constraints               types.Constraints       `description:"Filter services by constraint, matching with service tags" export:"true"`
+	ACME                      *acme.ACME              `description:"Enable ACME (Let's Encrypt): automatic SSL" export:"true"`
+	DefaultEntryPoints        DefaultEntryPoints      `description:"Entrypoints to be used by frontends that do not specify any entrypoint" export:"true"`
+	ProvidersThrottleDuration parse.Duration          `description:"Backends throttle duration: minimum duration between 2 events from providers before applying a new configuration. It avoids unnecessary reloads if multiples events are sent in a short amount of time." export:"true"`
+	MaxIdleConnsPerHost       int                     `description:"If non-zero, controls the maximum idle (keep-alive) to keep per-host.  If zero, DefaultMaxIdleConnsPerHost is used" export:"true"`
+	InsecureSkipVerify        bool                    `description:"Disable SSL certificate verification" export:"true"`
+	RootCAs                   tls.FilesOrContents     `description:"Add cert file for self-signed certificate"`
+	Retry                     *Retry                  `description:"Enable retry sending request if network error" export:"true"`
+	HealthCheck               *HealthCheckConfig      `description:"Health check parameters" export:"true"`
+	RespondingTimeouts        *RespondingTimeouts     `description:"Timeouts for incoming requests to the Traefik instance" export:"true"`
+	ForwardingTimeouts        *ForwardingTimeouts     `description:"Timeouts for requests forwarded to the backend servers" export:"true"`
+	KeepTrailingSlash         bool                    `description:"Do not remove trailing slash." export:"true"` // Deprecated
+	Docker                    *docker.Provider        `description:"Enable Docker backend with default settings" export:"true"`
+	File                      *file.Provider          `description:"Enable File backend with default settings" export:"true"`
+	Marathon                  *marathon.Provider      `description:"Enable Marathon backend with default settings" export:"true"`
+	Consul                    *consul.Provider        `description:"Enable Consul backend with default settings" export:"true"`
+	ConsulCatalog             *consulcatalog.Provider `description:"Enable Consul catalog backend with default settings" export:"true"`
+	Etcd                      *etcd.Provider          `description:"Enable Etcd backend with default settings" export:"true"`
+	Zookeeper                 *zk.Provider            `description:"Enable Zookeeper backend with default settings" export:"true"`
+	Boltdb                    *boltdb.Provider        `description:"Enable Boltdb backend with default settings" export:"true"`
+	Kubernetes                *kubernetes.Provider    `description:"Enable Kubernetes backend with default settings" export:"true"`
+	Mesos                     *mesos.Provider         `description:"Enable Mesos backend with default settings" export:"true"`
+	Eureka                    *eureka.Provider        `description:"Enable Eureka backend with default settings" export:"true"`
+	ECS                       *ecs.Provider           `description:"Enable ECS backend with default settings" export:"true"`
+	Rancher                   *rancher.Provider       `description:"Enable Rancher backend with default settings" export:"true"`
+	DynamoDB                  *dynamodb.Provider      `description:"Enable DynamoDB backend with default settings" export:"true"`
+	ServiceFabric             *servicefabric.Provider `description:"Enable Service Fabric backend with default settings" export:"true"`
+	Rest                      *rest.Provider          `description:"Enable Rest backend with default settings" export:"true"`
+	API                       *api.Handler            `description:"Enable api/dashboard" export:"true"`
+	Metrics                   *types.Metrics          `description:"Enable a metrics exporter" export:"true"`
+	Ping                      *ping.Handler           `description:"Enable ping" export:"true"`
+	HostResolver              *HostResolverConfig     `description:"Enable CNAME Flattening" export:"true"`
 }
 
-// SetEffectiveConfiguration adds missing configuration parameters derived from
-// existing ones. It also takes care of maintaining backwards compatibility.
-func (gc *GlobalConfiguration) SetEffectiveConfiguration() {
+// SetEffectiveConfiguration adds missing configuration parameters derived from existing ones.
+// It also takes care of maintaining backwards compatibility.
+func (gc *GlobalConfiguration) SetEffectiveConfiguration(configFile string) {
 	if len(gc.EntryPoints) == 0 {
-		gc.EntryPoints = map[string]*EntryPoint{"http": {Address: ":80"}}
+		gc.EntryPoints = map[string]*EntryPoint{"http": {
+			Address:          ":80",
+			ForwardedHeaders: &ForwardedHeaders{},
+		}}
 		gc.DefaultEntryPoints = []string{"http"}
+	}
+
+	if (gc.API != nil && gc.API.EntryPoint == DefaultInternalEntryPointName) ||
+		(gc.Ping != nil && gc.Ping.EntryPoint == DefaultInternalEntryPointName) ||
+		(gc.Metrics != nil && gc.Metrics.Prometheus != nil && gc.Metrics.Prometheus.EntryPoint == DefaultInternalEntryPointName) ||
+		(gc.Rest != nil && gc.Rest.EntryPoint == DefaultInternalEntryPointName) {
+		if _, ok := gc.EntryPoints[DefaultInternalEntryPointName]; !ok {
+			gc.EntryPoints[DefaultInternalEntryPointName] = &EntryPoint{Address: ":8080"}
+		}
+	}
+
+	for entryPointName := range gc.EntryPoints {
+		entryPoint := gc.EntryPoints[entryPointName]
+		// ForwardedHeaders must be remove in the next breaking version
+		if entryPoint.ForwardedHeaders == nil {
+			entryPoint.ForwardedHeaders = &ForwardedHeaders{}
+		}
+
+		if entryPoint.TLS != nil && entryPoint.TLS.DefaultCertificate == nil && len(entryPoint.TLS.Certificates) > 0 {
+			log.Infof("No tls.defaultCertificate given for %s: using the first item in tls.certificates as a fallback.", entryPointName)
+			entryPoint.TLS.DefaultCertificate = &entryPoint.TLS.Certificates[0]
+		}
 	}
 
 	// Make sure LifeCycle isn't nil to spare nil checks elsewhere.
 	if gc.LifeCycle == nil {
 		gc.LifeCycle = &LifeCycle{}
-	}
-
-	// Prefer legacy grace timeout parameter for backwards compatibility reasons.
-	if gc.GraceTimeOut > 0 {
-		log.Warn("top-level grace period configuration has been deprecated -- please use lifecycle grace period")
-		gc.LifeCycle.GraceTimeOut = gc.GraceTimeOut
 	}
 
 	if gc.Rancher != nil {
@@ -128,8 +168,189 @@ func (gc *GlobalConfiguration) SetEffectiveConfiguration() {
 		}
 	}
 
-	if gc.Debug {
-		gc.LogLevel = "DEBUG"
+	if gc.API != nil {
+		gc.API.Debug = gc.Debug
+	}
+
+	if gc.File != nil {
+		gc.File.TraefikFile = configFile
+	}
+
+	gc.initACMEProvider()
+	gc.initTracing()
+}
+
+func (gc *GlobalConfiguration) initTracing() {
+	if gc.Tracing != nil {
+		switch gc.Tracing.Backend {
+		case jaeger.Name:
+			if gc.Tracing.Jaeger == nil {
+				gc.Tracing.Jaeger = &jaeger.Config{
+					SamplingServerURL:  "http://localhost:5778/sampling",
+					SamplingType:       "const",
+					SamplingParam:      1.0,
+					LocalAgentHostPort: "127.0.0.1:6831",
+					Propagation:        "jaeger",
+					Gen128Bit:          false,
+				}
+			}
+			if gc.Tracing.Zipkin != nil {
+				log.Warn("Zipkin configuration will be ignored")
+				gc.Tracing.Zipkin = nil
+			}
+			if gc.Tracing.DataDog != nil {
+				log.Warn("DataDog configuration will be ignored")
+				gc.Tracing.DataDog = nil
+			}
+		case zipkin.Name:
+			if gc.Tracing.Zipkin == nil {
+				gc.Tracing.Zipkin = &zipkin.Config{
+					HTTPEndpoint: "http://localhost:9411/api/v1/spans",
+					SameSpan:     false,
+					ID128Bit:     true,
+					Debug:        false,
+					SampleRate:   1.0,
+				}
+			}
+			if gc.Tracing.Jaeger != nil {
+				log.Warn("Jaeger configuration will be ignored")
+				gc.Tracing.Jaeger = nil
+			}
+			if gc.Tracing.DataDog != nil {
+				log.Warn("DataDog configuration will be ignored")
+				gc.Tracing.DataDog = nil
+			}
+		case datadog.Name:
+			if gc.Tracing.DataDog == nil {
+				gc.Tracing.DataDog = &datadog.Config{
+					LocalAgentHostPort: "localhost:8126",
+					GlobalTag:          "",
+					Debug:              false,
+				}
+			}
+			if gc.Tracing.Zipkin != nil {
+				log.Warn("Zipkin configuration will be ignored")
+				gc.Tracing.Zipkin = nil
+			}
+			if gc.Tracing.Jaeger != nil {
+				log.Warn("Jaeger configuration will be ignored")
+				gc.Tracing.Jaeger = nil
+			}
+		default:
+			log.Warnf("Unknown tracer %q", gc.Tracing.Backend)
+			return
+		}
+	}
+}
+
+func (gc *GlobalConfiguration) initACMEProvider() {
+	if gc.ACME != nil {
+		gc.ACME.CAServer = getSafeACMECAServer(gc.ACME.CAServer)
+
+		if gc.ACME.DNSChallenge != nil && gc.ACME.HTTPChallenge != nil {
+			log.Warn("Unable to use DNS challenge and HTTP challenge at the same time. Fallback to DNS challenge.")
+			gc.ACME.HTTPChallenge = nil
+		}
+
+		if gc.ACME.DNSChallenge != nil && gc.ACME.TLSChallenge != nil {
+			log.Warn("Unable to use DNS challenge and TLS challenge at the same time. Fallback to DNS challenge.")
+			gc.ACME.TLSChallenge = nil
+		}
+
+		if gc.ACME.HTTPChallenge != nil && gc.ACME.TLSChallenge != nil {
+			log.Warn("Unable to use HTTP challenge and TLS challenge at the same time. Fallback to TLS challenge.")
+			gc.ACME.HTTPChallenge = nil
+		}
+
+		for _, domain := range gc.ACME.Domains {
+			if domain.Main != lego.UnFqdn(domain.Main) {
+				log.Warnf("FQDN detected, please remove the trailing dot: %s", domain.Main)
+			}
+			for _, san := range domain.SANs {
+				if san != lego.UnFqdn(san) {
+					log.Warnf("FQDN detected, please remove the trailing dot: %s", san)
+				}
+			}
+		}
+
+		if len(gc.ACME.DNSProvider) > 0 {
+			log.Warn("ACME.DNSProvider is deprecated, use ACME.DNSChallenge instead")
+			gc.ACME.DNSChallenge = &acmeprovider.DNSChallenge{Provider: gc.ACME.DNSProvider, DelayBeforeCheck: gc.ACME.DelayDontCheckDNS}
+		}
+
+		if gc.ACME.OnDemand {
+			log.Warn("ACME.OnDemand is deprecated")
+		}
+	}
+}
+
+// InitACMEProvider create an acme provider from the ACME part of globalConfiguration
+func (gc *GlobalConfiguration) InitACMEProvider() (*acmeprovider.Provider, error) {
+	if gc.ACME != nil {
+		if len(gc.ACME.Storage) == 0 {
+			// Delete the ACME configuration to avoid starting ACME in cluster mode
+			gc.ACME = nil
+			return nil, errors.New("unable to initialize ACME provider with no storage location for the certificates")
+		}
+		// TODO: Remove when Provider ACME will replace totally ACME
+		// If provider file, use Provider ACME instead of ACME
+		if gc.Cluster == nil {
+			provider := &acmeprovider.Provider{}
+			provider.Configuration = &acmeprovider.Configuration{
+				KeyType:       gc.ACME.KeyType,
+				OnHostRule:    gc.ACME.OnHostRule,
+				OnDemand:      gc.ACME.OnDemand,
+				Email:         gc.ACME.Email,
+				Storage:       gc.ACME.Storage,
+				HTTPChallenge: gc.ACME.HTTPChallenge,
+				DNSChallenge:  gc.ACME.DNSChallenge,
+				TLSChallenge:  gc.ACME.TLSChallenge,
+				Domains:       gc.ACME.Domains,
+				ACMELogging:   gc.ACME.ACMELogging,
+				CAServer:      gc.ACME.CAServer,
+				EntryPoint:    gc.ACME.EntryPoint,
+			}
+
+			store := acmeprovider.NewLocalStore(provider.Storage)
+			provider.Store = store
+			acme.ConvertToNewFormat(provider.Storage)
+			gc.ACME = nil
+			return provider, nil
+		}
+	}
+	return nil, nil
+}
+
+func getSafeACMECAServer(caServerSrc string) string {
+	if len(caServerSrc) == 0 {
+		return DefaultAcmeCAServer
+	}
+
+	if strings.HasPrefix(caServerSrc, "https://acme-v01.api.letsencrypt.org") {
+		caServer := strings.Replace(caServerSrc, "v01", "v02", 1)
+		log.Warnf("The CA server %[1]q refers to a v01 endpoint of the ACME API, please change to %[2]q. Fallback to %[2]q.", caServerSrc, caServer)
+		return caServer
+	}
+
+	if strings.HasPrefix(caServerSrc, "https://acme-staging.api.letsencrypt.org") {
+		caServer := strings.Replace(caServerSrc, "https://acme-staging.api.letsencrypt.org", "https://acme-staging-v02.api.letsencrypt.org", 1)
+		log.Warnf("The CA server %[1]q refers to a v01 endpoint of the ACME API, please change to %[2]q. Fallback to %[2]q.", caServerSrc, caServer)
+		return caServer
+	}
+
+	return caServerSrc
+}
+
+// ValidateConfiguration validate that configuration is coherent
+func (gc *GlobalConfiguration) ValidateConfiguration() {
+	if gc.ACME != nil {
+		if _, ok := gc.EntryPoints[gc.ACME.EntryPoint]; !ok {
+			log.Fatalf("Unknown entrypoint %q for ACME configuration", gc.ACME.EntryPoint)
+		} else {
+			if gc.EntryPoints[gc.ACME.EntryPoint].TLS == nil {
+				log.Fatalf("Entrypoint %q has no TLS configuration for ACME configuration", gc.ACME.EntryPoint)
+			}
+		}
 	}
 }
 
@@ -158,12 +379,12 @@ func (dep *DefaultEntryPoints) Set(value string) error {
 
 // Get return the EntryPoints map
 func (dep *DefaultEntryPoints) Get() interface{} {
-	return DefaultEntryPoints(*dep)
+	return *dep
 }
 
 // SetValue sets the EntryPoints map with val
 func (dep *DefaultEntryPoints) SetValue(val interface{}) {
-	*dep = DefaultEntryPoints(val.(DefaultEntryPoints))
+	*dep = val.(DefaultEntryPoints)
 }
 
 // Type is type of the struct
@@ -171,337 +392,40 @@ func (dep *DefaultEntryPoints) Type() string {
 	return "defaultentrypoints"
 }
 
-// RootCAs hold the CA we want to have in root
-type RootCAs []FileOrContent
-
-// FileOrContent hold a file path or content
-type FileOrContent string
-
-func (f FileOrContent) String() string {
-	return string(f)
-}
-
-func (f FileOrContent) Read() ([]byte, error) {
-	var content []byte
-	if _, err := os.Stat(f.String()); err == nil {
-		content, err = ioutil.ReadFile(f.String())
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		content = []byte(f)
-	}
-	return content, nil
-}
-
-// String is the method to format the flag's value, part of the flag.Value interface.
-// The String method's output will be used in diagnostics.
-func (r *RootCAs) String() string {
-	sliceOfString := make([]string, len([]FileOrContent(*r)))
-	for key, value := range *r {
-		sliceOfString[key] = value.String()
-	}
-	return strings.Join(sliceOfString, ",")
-}
-
-// Set is the method to set the flag value, part of the flag.Value interface.
-// Set's argument is a string to be parsed to set the flag.
-// It's a comma-separated list, so we split it.
-func (r *RootCAs) Set(value string) error {
-	rootCAs := strings.Split(value, ",")
-	if len(rootCAs) == 0 {
-		return fmt.Errorf("bad RootCAs format: %s", value)
-	}
-	for _, rootCA := range rootCAs {
-		*r = append(*r, FileOrContent(rootCA))
-	}
-	return nil
-}
-
-// Get return the EntryPoints map
-func (r *RootCAs) Get() interface{} {
-	return RootCAs(*r)
-}
-
-// SetValue sets the EntryPoints map with val
-func (r *RootCAs) SetValue(val interface{}) {
-	*r = RootCAs(val.(RootCAs))
-}
-
-// Type is type of the struct
-func (r *RootCAs) Type() string {
-	return "rootcas"
-}
-
-// EntryPoints holds entry points configuration of the reverse proxy (ip, port, TLS...)
-type EntryPoints map[string]*EntryPoint
-
-// String is the method to format the flag's value, part of the flag.Value interface.
-// The String method's output will be used in diagnostics.
-func (ep *EntryPoints) String() string {
-	return fmt.Sprintf("%+v", *ep)
-}
-
-// Set is the method to set the flag value, part of the flag.Value interface.
-// Set's argument is a string to be parsed to set the flag.
-// It's a comma-separated list, so we split it.
-func (ep *EntryPoints) Set(value string) error {
-	result, err := parseEntryPointsConfiguration(value)
-	if err != nil {
-		return err
-	}
-
-	var configTLS *TLS
-	if len(result["TLS"]) > 0 {
-		certs := Certificates{}
-		if err := certs.Set(result["TLS"]); err != nil {
-			return err
-		}
-		configTLS = &TLS{
-			Certificates: certs,
-		}
-	} else if len(result["TLSACME"]) > 0 {
-		configTLS = &TLS{
-			Certificates: Certificates{},
-		}
-	}
-	if len(result["CA"]) > 0 {
-		files := strings.Split(result["CA"], ",")
-		configTLS.ClientCAFiles = files
-	}
-	var redirect *Redirect
-	if len(result["RedirectEntryPoint"]) > 0 || len(result["RedirectRegex"]) > 0 || len(result["RedirectReplacement"]) > 0 {
-		redirect = &Redirect{
-			EntryPoint:  result["RedirectEntryPoint"],
-			Regex:       result["RedirectRegex"],
-			Replacement: result["RedirectReplacement"],
-		}
-	}
-
-	whiteListSourceRange := []string{}
-	if len(result["WhiteListSourceRange"]) > 0 {
-		whiteListSourceRange = strings.Split(result["WhiteListSourceRange"], ",")
-	}
-
-	compress := toBool(result, "Compress")
-	proxyProtocol := toBool(result, "ProxyProtocol")
-
-	(*ep)[result["Name"]] = &EntryPoint{
-		Address:              result["Address"],
-		TLS:                  configTLS,
-		Redirect:             redirect,
-		Compress:             compress,
-		WhitelistSourceRange: whiteListSourceRange,
-		ProxyProtocol:        proxyProtocol,
-	}
-
-	return nil
-}
-
-func parseEntryPointsConfiguration(value string) (map[string]string, error) {
-	regex := regexp.MustCompile(`(?:Name:(?P<Name>\S*))\s*(?:Address:(?P<Address>\S*))?\s*(?:TLS:(?P<TLS>\S*))?\s*(?P<TLSACME>TLS)?\s*(?:CA:(?P<CA>\S*))?\s*(?:Redirect\.EntryPoint:(?P<RedirectEntryPoint>\S*))?\s*(?:Redirect\.Regex:(?P<RedirectRegex>\S*))?\s*(?:Redirect\.Replacement:(?P<RedirectReplacement>\S*))?\s*(?:Compress:(?P<Compress>\S*))?\s*(?:WhiteListSourceRange:(?P<WhiteListSourceRange>\S*))?\s*(?:ProxyProtocol:(?P<ProxyProtocol>\S*))?`)
-	match := regex.FindAllStringSubmatch(value, -1)
-	if match == nil {
-		return nil, fmt.Errorf("bad EntryPoints format: %s", value)
-	}
-	matchResult := match[0]
-	result := make(map[string]string)
-	for i, name := range regex.SubexpNames() {
-		if i != 0 && len(matchResult[i]) != 0 {
-			result[name] = matchResult[i]
-		}
-	}
-	return result, nil
-}
-
-func toBool(conf map[string]string, key string) bool {
-	if val, ok := conf[key]; ok {
-		return strings.EqualFold(val, "true") ||
-			strings.EqualFold(val, "enable") ||
-			strings.EqualFold(val, "on")
-	}
-	return false
-}
-
-// Get return the EntryPoints map
-func (ep *EntryPoints) Get() interface{} {
-	return EntryPoints(*ep)
-}
-
-// SetValue sets the EntryPoints map with val
-func (ep *EntryPoints) SetValue(val interface{}) {
-	*ep = EntryPoints(val.(EntryPoints))
-}
-
-// Type is type of the struct
-func (ep *EntryPoints) Type() string {
-	return "entrypoints"
-}
-
-// EntryPoint holds an entry point configuration of the reverse proxy (ip, port, TLS...)
-type EntryPoint struct {
-	Network              string
-	Address              string
-	TLS                  *TLS
-	Redirect             *Redirect
-	Auth                 *types.Auth
-	WhitelistSourceRange []string
-	Compress             bool
-	ProxyProtocol        bool
-}
-
-// Redirect configures a redirection of an entry point to another, or to an URL
-type Redirect struct {
-	EntryPoint  string
-	Regex       string
-	Replacement string
-}
-
-// TLS configures TLS for an entry point
-type TLS struct {
-	MinVersion    string
-	CipherSuites  []string
-	Certificates  Certificates
-	ClientCAFiles []string
-}
-
-// MinVersion Map of allowed TLS minimum versions
-var MinVersion = map[string]uint16{
-	`VersionTLS10`: tls.VersionTLS10,
-	`VersionTLS11`: tls.VersionTLS11,
-	`VersionTLS12`: tls.VersionTLS12,
-}
-
-// CipherSuites Map of TLS CipherSuites from crypto/tls
-// Available CipherSuites defined at https://golang.org/pkg/crypto/tls/#pkg-constants
-var CipherSuites = map[string]uint16{
-	`TLS_RSA_WITH_RC4_128_SHA`:                tls.TLS_RSA_WITH_RC4_128_SHA,
-	`TLS_RSA_WITH_3DES_EDE_CBC_SHA`:           tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
-	`TLS_RSA_WITH_AES_128_CBC_SHA`:            tls.TLS_RSA_WITH_AES_128_CBC_SHA,
-	`TLS_RSA_WITH_AES_256_CBC_SHA`:            tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-	`TLS_RSA_WITH_AES_128_CBC_SHA256`:         tls.TLS_RSA_WITH_AES_128_CBC_SHA256,
-	`TLS_RSA_WITH_AES_128_GCM_SHA256`:         tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
-	`TLS_RSA_WITH_AES_256_GCM_SHA384`:         tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
-	`TLS_ECDHE_ECDSA_WITH_RC4_128_SHA`:        tls.TLS_ECDHE_ECDSA_WITH_RC4_128_SHA,
-	`TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA`:    tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
-	`TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA`:    tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
-	`TLS_ECDHE_RSA_WITH_RC4_128_SHA`:          tls.TLS_ECDHE_RSA_WITH_RC4_128_SHA,
-	`TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA`:     tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
-	`TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA`:      tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-	`TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA`:      tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-	`TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256`: tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
-	`TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256`:   tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
-	`TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`:   tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-	`TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`: tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-	`TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`:   tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-	`TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`: tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-	`TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305`:    tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-	`TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305`:  tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-}
-
-// Certificates defines traefik certificates type
-// Certs and Keys could be either a file path, or the file content itself
-type Certificates []Certificate
-
-//CreateTLSConfig creates a TLS config from Certificate structures
-func (certs *Certificates) CreateTLSConfig() (*tls.Config, error) {
-	config := &tls.Config{}
-	config.Certificates = []tls.Certificate{}
-	certsSlice := []Certificate(*certs)
-	for _, v := range certsSlice {
-		cert := tls.Certificate{}
-
-		var err error
-
-		certContent, err := v.CertFile.Read()
-		if err != nil {
-			return nil, err
-		}
-
-		keyContent, err := v.KeyFile.Read()
-		if err != nil {
-			return nil, err
-		}
-
-		cert, err = tls.X509KeyPair(certContent, keyContent)
-		if err != nil {
-			return nil, err
-		}
-
-		config.Certificates = append(config.Certificates, cert)
-	}
-	return config, nil
-}
-
-// String is the method to format the flag's value, part of the flag.Value interface.
-// The String method's output will be used in diagnostics.
-func (certs *Certificates) String() string {
-	if len(*certs) == 0 {
-		return ""
-	}
-	var result []string
-	for _, certificate := range *certs {
-		result = append(result, certificate.CertFile.String()+","+certificate.KeyFile.String())
-	}
-	return strings.Join(result, ";")
-}
-
-// Set is the method to set the flag value, part of the flag.Value interface.
-// Set's argument is a string to be parsed to set the flag.
-// It's a comma-separated list, so we split it.
-func (certs *Certificates) Set(value string) error {
-	certificates := strings.Split(value, ";")
-	for _, certificate := range certificates {
-		files := strings.Split(certificate, ",")
-		if len(files) != 2 {
-			return fmt.Errorf("bad certificates format: %s", value)
-		}
-		*certs = append(*certs, Certificate{
-			CertFile: FileOrContent(files[0]),
-			KeyFile:  FileOrContent(files[1]),
-		})
-	}
-	return nil
-}
-
-// Type is type of the struct
-func (certs *Certificates) Type() string {
-	return "certificates"
-}
-
-// Certificate holds a SSL cert/key pair
-// Certs and Key could be either a file path, or the file content itself
-type Certificate struct {
-	CertFile FileOrContent
-	KeyFile  FileOrContent
-}
-
 // Retry contains request retry config
 type Retry struct {
-	Attempts int `description:"Number of attempts"`
+	Attempts int `description:"Number of attempts" export:"true"`
 }
 
 // HealthCheckConfig contains health check configuration parameters.
 type HealthCheckConfig struct {
-	Interval flaeg.Duration `description:"Default periodicity of enabled health checks"`
+	Interval parse.Duration `description:"Default periodicity of enabled health checks" export:"true"`
+	Timeout  parse.Duration `description:"Default request timeout of enabled health checks" export:"true"`
 }
 
 // RespondingTimeouts contains timeout configurations for incoming requests to the Traefik instance.
 type RespondingTimeouts struct {
-	ReadTimeout  flaeg.Duration `description:"ReadTimeout is the maximum duration for reading the entire request, including the body. If zero, no timeout is set"`
-	WriteTimeout flaeg.Duration `description:"WriteTimeout is the maximum duration before timing out writes of the response. If zero, no timeout is set"`
-	IdleTimeout  flaeg.Duration `description:"IdleTimeout is the maximum amount duration an idle (keep-alive) connection will remain idle before closing itself. Defaults to 180 seconds. If zero, no timeout is set"`
+	ReadTimeout  parse.Duration `description:"ReadTimeout is the maximum duration for reading the entire request, including the body. If zero, no timeout is set" export:"true"`
+	WriteTimeout parse.Duration `description:"WriteTimeout is the maximum duration before timing out writes of the response. If zero, no timeout is set" export:"true"`
+	IdleTimeout  parse.Duration `description:"IdleTimeout is the maximum amount duration an idle (keep-alive) connection will remain idle before closing itself. Defaults to 180 seconds. If zero, no timeout is set" export:"true"`
 }
 
 // ForwardingTimeouts contains timeout configurations for forwarding requests to the backend servers.
 type ForwardingTimeouts struct {
-	DialTimeout           flaeg.Duration `description:"The amount of time to wait until a connection to a backend server can be established. Defaults to 30 seconds. If zero, no timeout exists"`
-	ResponseHeaderTimeout flaeg.Duration `description:"The amount of time to wait for a server's response headers after fully writing the request (including its body, if any). If zero, no timeout exists"`
+	DialTimeout           parse.Duration `description:"The amount of time to wait until a connection to a backend server can be established. Defaults to 30 seconds. If zero, no timeout exists" export:"true"`
+	ResponseHeaderTimeout parse.Duration `description:"The amount of time to wait for a server's response headers after fully writing the request (including its body, if any). If zero, no timeout exists" export:"true"`
 }
 
 // LifeCycle contains configurations relevant to the lifecycle (such as the
 // shutdown phase) of Traefik.
 type LifeCycle struct {
-	RequestAcceptGraceTimeout flaeg.Duration `description:"Duration to keep accepting requests before Traefik initiates the graceful shutdown procedure"`
-	GraceTimeOut              flaeg.Duration `description:"Duration to give active requests a chance to finish before Traefik stops"`
+	RequestAcceptGraceTimeout parse.Duration `description:"Duration to keep accepting requests before Traefik initiates the graceful shutdown procedure"`
+	GraceTimeOut              parse.Duration `description:"Duration to give active requests a chance to finish before Traefik stops"`
+}
+
+// HostResolverConfig contain configuration for CNAME Flattening
+type HostResolverConfig struct {
+	CnameFlattening bool   `description:"A flag to enable/disable CNAME flattening" export:"true"`
+	ResolvConfig    string `description:"resolv.conf used for DNS resolving" export:"true"`
+	ResolvDepth     int    `description:"The maximal depth of DNS recursive resolving" export:"true"`
 }

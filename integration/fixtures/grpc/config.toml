@@ -1,18 +1,17 @@
 defaultEntryPoints = ["https"]
 
-RootCAs = [ """{{ .CertContent }}""" ]
+rootCAs = [ """{{ .CertContent }}""" ]
 
 [entryPoints]
   [entryPoints.https]
   address = ":4443"
     [entryPoints.https.tls]
      [[entryPoints.https.tls.certificates]]
-     CertFile = """{{ .CertContent }}"""
-     KeyFile  = """{{ .KeyContent }}"""
+     certFile = """{{ .CertContent }}"""
+     keyFile  = """{{ .KeyContent }}"""
 
 
-[web]
-  address = ":8080"
+[api]
 
 [file]
 
@@ -20,6 +19,7 @@ RootCAs = [ """{{ .CertContent }}""" ]
   [backends.backend1]
     [backends.backend1.servers.server1]
     url = "https://127.0.0.1:{{ .GRPCServerPort }}"
+    weight = 1
 
 
 [frontends]

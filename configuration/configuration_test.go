@@ -1,250 +1,223 @@
 package configuration
 
 import (
-	"fmt"
 	"testing"
-	"time"
 
-	"github.com/containous/flaeg"
+	"github.com/containous/traefik/acme"
+	"github.com/containous/traefik/middlewares/tracing"
+	"github.com/containous/traefik/middlewares/tracing/jaeger"
+	"github.com/containous/traefik/middlewares/tracing/zipkin"
+	"github.com/containous/traefik/provider"
+	acmeprovider "github.com/containous/traefik/provider/acme"
+	"github.com/containous/traefik/provider/file"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func Test_parseEntryPointsConfiguration(t *testing.T) {
+const defaultConfigFile = "traefik.toml"
+
+func TestSetEffectiveConfigurationFileProviderFilename(t *testing.T) {
 	testCases := []struct {
-		name           string
-		value          string
-		expectedResult map[string]string
+		desc                        string
+		fileProvider                *file.Provider
+		wantFileProviderFilename    string
+		wantFileProviderTraefikFile string
 	}{
 		{
-			name:  "all parameters",
-			value: "Name:foo Address:bar TLS:goo TLS CA:car Redirect.EntryPoint:RedirectEntryPoint Redirect.Regex:RedirectRegex Redirect.Replacement:RedirectReplacement Compress:true WhiteListSourceRange:WhiteListSourceRange ProxyProtocol:true",
-			expectedResult: map[string]string{
-				"Name":                 "foo",
-				"Address":              "bar",
-				"CA":                   "car",
-				"TLS":                  "goo",
-				"TLSACME":              "TLS",
-				"RedirectEntryPoint":   "RedirectEntryPoint",
-				"RedirectRegex":        "RedirectRegex",
-				"RedirectReplacement":  "RedirectReplacement",
-				"WhiteListSourceRange": "WhiteListSourceRange",
-				"ProxyProtocol":        "true",
-				"Compress":             "true",
-			},
+			desc:                        "no filename for file provider given",
+			fileProvider:                &file.Provider{},
+			wantFileProviderFilename:    "",
+			wantFileProviderTraefikFile: defaultConfigFile,
 		},
 		{
-			name:  "proxy protocol on",
-			value: "Name:foo ProxyProtocol:on",
-			expectedResult: map[string]string{
-				"Name":          "foo",
-				"ProxyProtocol": "on",
-			},
+			desc:                        "filename for file provider given",
+			fileProvider:                &file.Provider{BaseProvider: provider.BaseProvider{Filename: "other.toml"}},
+			wantFileProviderFilename:    "other.toml",
+			wantFileProviderTraefikFile: defaultConfigFile,
 		},
 		{
-			name:  "compress on",
-			value: "Name:foo Compress:on",
-			expectedResult: map[string]string{
-				"Name":     "foo",
-				"Compress": "on",
-			},
-		},
-		{
-			name:  "TLS",
-			value: "Name:foo TLS:goo TLS",
-			expectedResult: map[string]string{
-				"Name":    "foo",
-				"TLS":     "goo",
-				"TLSACME": "TLS",
-			},
+			desc:                        "directory for file provider given",
+			fileProvider:                &file.Provider{Directory: "/"},
+			wantFileProviderFilename:    "",
+			wantFileProviderTraefikFile: defaultConfigFile,
 		},
 	}
 
 	for _, test := range testCases {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			conf, err := parseEntryPointsConfiguration(test.value)
-			if err != nil {
-				t.Error(err)
-			}
-
-			for key, value := range conf {
-				fmt.Println(key, value)
-			}
-
-			assert.Len(t, conf, len(test.expectedResult))
-			assert.Equal(t, test.expectedResult, conf)
-		})
-	}
-}
-
-func Test_toBool(t *testing.T) {
-	testCases := []struct {
-		name         string
-		value        string
-		key          string
-		expectedBool bool
-	}{
-		{
-			name:         "on",
-			value:        "on",
-			key:          "foo",
-			expectedBool: true,
-		},
-		{
-			name:         "true",
-			value:        "true",
-			key:          "foo",
-			expectedBool: true,
-		},
-		{
-			name:         "enable",
-			value:        "enable",
-			key:          "foo",
-			expectedBool: true,
-		},
-		{
-			name:         "arbitrary string",
-			value:        "bar",
-			key:          "foo",
-			expectedBool: false,
-		},
-		{
-			name:         "no existing entry",
-			value:        "bar",
-			key:          "fii",
-			expectedBool: false,
-		},
-	}
-
-	for _, test := range testCases {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			conf := map[string]string{
-				"foo": test.value,
-			}
-
-			result := toBool(conf, test.key)
-
-			assert.Equal(t, test.expectedBool, result)
-		})
-	}
-}
-
-func TestEntryPoints_Set(t *testing.T) {
-	testCases := []struct {
-		name                   string
-		expression             string
-		expectedEntryPointName string
-		expectedEntryPoint     *EntryPoint
-	}{
-		{
-			name:                   "all parameters",
-			expression:             "Name:foo Address:bar TLS:goo,gii TLS CA:car Redirect.EntryPoint:RedirectEntryPoint Redirect.Regex:RedirectRegex Redirect.Replacement:RedirectReplacement Compress:true WhiteListSourceRange:Range ProxyProtocol:true",
-			expectedEntryPointName: "foo",
-			expectedEntryPoint: &EntryPoint{
-				Address: "bar",
-				Redirect: &Redirect{
-					EntryPoint:  "RedirectEntryPoint",
-					Regex:       "RedirectRegex",
-					Replacement: "RedirectReplacement",
-				},
-				Compress:             true,
-				ProxyProtocol:        true,
-				WhitelistSourceRange: []string{"Range"},
-				TLS: &TLS{
-					ClientCAFiles: []string{"car"},
-					Certificates: Certificates{
-						{
-							CertFile: FileOrContent("goo"),
-							KeyFile:  FileOrContent("gii"),
-						},
-					},
-				},
-			},
-		},
-		{
-			name:                   "compress on",
-			expression:             "Name:foo Compress:on",
-			expectedEntryPointName: "foo",
-			expectedEntryPoint: &EntryPoint{
-				Compress:             true,
-				WhitelistSourceRange: []string{},
-			},
-		},
-		{
-			name:                   "compress true",
-			expression:             "Name:foo Compress:true",
-			expectedEntryPointName: "foo",
-			expectedEntryPoint: &EntryPoint{
-				Compress:             true,
-				WhitelistSourceRange: []string{},
-			},
-		},
-	}
-
-	for _, test := range testCases {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			eps := EntryPoints{}
-			err := eps.Set(test.expression)
-			require.NoError(t, err)
-
-			ep := eps[test.expectedEntryPointName]
-			assert.EqualValues(t, test.expectedEntryPoint, ep)
-		})
-	}
-}
-
-func TestSetEffecticeConfiguration(t *testing.T) {
-	tests := []struct {
-		desc                  string
-		legacyGraceTimeout    time.Duration
-		lifeCycleGraceTimeout time.Duration
-		wantGraceTimeout      time.Duration
-	}{
-		{
-			desc:               "legacy grace timeout given only",
-			legacyGraceTimeout: 5 * time.Second,
-			wantGraceTimeout:   5 * time.Second,
-		},
-		{
-			desc:                  "legacy and life cycle grace timeouts given",
-			legacyGraceTimeout:    5 * time.Second,
-			lifeCycleGraceTimeout: 12 * time.Second,
-			wantGraceTimeout:      5 * time.Second,
-		},
-		{
-			desc:                  "legacy grace timeout omitted",
-			legacyGraceTimeout:    0,
-			lifeCycleGraceTimeout: 12 * time.Second,
-			wantGraceTimeout:      12 * time.Second,
-		},
-	}
-
-	for _, test := range tests {
 		test := test
 		t.Run(test.desc, func(t *testing.T) {
 			t.Parallel()
+
 			gc := &GlobalConfiguration{
-				GraceTimeOut: flaeg.Duration(test.legacyGraceTimeout),
-			}
-			if test.lifeCycleGraceTimeout > 0 {
-				gc.LifeCycle = &LifeCycle{
-					GraceTimeOut: flaeg.Duration(test.lifeCycleGraceTimeout),
-				}
+				File: test.fileProvider,
 			}
 
-			gc.SetEffectiveConfiguration()
-			gotGraceTimeout := time.Duration(gc.LifeCycle.GraceTimeOut)
-			if gotGraceTimeout != test.wantGraceTimeout {
-				t.Fatalf("got effective grace timeout %d, want %d", gotGraceTimeout, test.wantGraceTimeout)
+			gc.SetEffectiveConfiguration(defaultConfigFile)
+
+			assert.Equal(t, test.wantFileProviderFilename, gc.File.Filename)
+			assert.Equal(t, test.wantFileProviderTraefikFile, gc.File.TraefikFile)
+		})
+	}
+}
+
+func TestSetEffectiveConfigurationTracing(t *testing.T) {
+	testCases := []struct {
+		desc     string
+		tracing  *tracing.Tracing
+		expected *tracing.Tracing
+	}{
+		{
+			desc:     "no tracing configuration",
+			tracing:  &tracing.Tracing{},
+			expected: &tracing.Tracing{},
+		},
+		{
+			desc: "tracing bad backend name",
+			tracing: &tracing.Tracing{
+				Backend: "powpow",
+			},
+			expected: &tracing.Tracing{
+				Backend: "powpow",
+			},
+		},
+		{
+			desc: "tracing jaeger backend name",
+			tracing: &tracing.Tracing{
+				Backend: "jaeger",
+				Zipkin: &zipkin.Config{
+					HTTPEndpoint: "http://localhost:9411/api/v1/spans",
+					SameSpan:     false,
+					ID128Bit:     true,
+					Debug:        false,
+				},
+			},
+			expected: &tracing.Tracing{
+				Backend: "jaeger",
+				Jaeger: &jaeger.Config{
+					SamplingServerURL:  "http://localhost:5778/sampling",
+					SamplingType:       "const",
+					SamplingParam:      1.0,
+					LocalAgentHostPort: "127.0.0.1:6831",
+					Propagation:        "jaeger",
+					Gen128Bit:          false,
+				},
+				Zipkin: nil,
+			},
+		},
+		{
+			desc: "tracing zipkin backend name",
+			tracing: &tracing.Tracing{
+				Backend: "zipkin",
+				Jaeger: &jaeger.Config{
+					SamplingServerURL:  "http://localhost:5778/sampling",
+					SamplingType:       "const",
+					SamplingParam:      1.0,
+					LocalAgentHostPort: "127.0.0.1:6831",
+				},
+			},
+			expected: &tracing.Tracing{
+				Backend: "zipkin",
+				Jaeger:  nil,
+				Zipkin: &zipkin.Config{
+					HTTPEndpoint: "http://localhost:9411/api/v1/spans",
+					SameSpan:     false,
+					ID128Bit:     true,
+					Debug:        false,
+					SampleRate:   1.0,
+				},
+			},
+		},
+		{
+			desc: "tracing zipkin backend name value override",
+			tracing: &tracing.Tracing{
+				Backend: "zipkin",
+				Jaeger: &jaeger.Config{
+					SamplingServerURL:  "http://localhost:5778/sampling",
+					SamplingType:       "const",
+					SamplingParam:      1.0,
+					LocalAgentHostPort: "127.0.0.1:6831",
+				},
+				Zipkin: &zipkin.Config{
+					HTTPEndpoint: "http://powpow:9411/api/v1/spans",
+					SameSpan:     true,
+					ID128Bit:     true,
+					Debug:        true,
+					SampleRate:   0.02,
+				},
+			},
+			expected: &tracing.Tracing{
+				Backend: "zipkin",
+				Jaeger:  nil,
+				Zipkin: &zipkin.Config{
+					HTTPEndpoint: "http://powpow:9411/api/v1/spans",
+					SameSpan:     true,
+					ID128Bit:     true,
+					Debug:        true,
+					SampleRate:   0.02,
+				},
+			},
+		},
+	}
+
+	for _, test := range testCases {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
+			t.Parallel()
+
+			gc := &GlobalConfiguration{
+				Tracing: test.tracing,
+			}
+
+			gc.SetEffectiveConfiguration(defaultConfigFile)
+
+			assert.Equal(t, test.expected, gc.Tracing)
+		})
+	}
+}
+
+func TestInitACMEProvider(t *testing.T) {
+	testCases := []struct {
+		desc                  string
+		acmeConfiguration     *acme.ACME
+		expectedConfiguration *acmeprovider.Provider
+		noError               bool
+	}{
+		{
+			desc:                  "No ACME configuration",
+			acmeConfiguration:     nil,
+			expectedConfiguration: nil,
+			noError:               true,
+		},
+		{
+			desc:                  "ACME configuration with storage",
+			acmeConfiguration:     &acme.ACME{Storage: "foo/acme.json"},
+			expectedConfiguration: &acmeprovider.Provider{Configuration: &acmeprovider.Configuration{Storage: "foo/acme.json"}},
+			noError:               true,
+		},
+		{
+			desc:                  "ACME configuration with no storage",
+			acmeConfiguration:     &acme.ACME{},
+			expectedConfiguration: nil,
+			noError:               false,
+		},
+	}
+
+	for _, test := range testCases {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
+			t.Parallel()
+
+			gc := &GlobalConfiguration{
+				ACME: test.acmeConfiguration,
+			}
+
+			configuration, err := gc.InitACMEProvider()
+
+			assert.True(t, (err == nil) == test.noError)
+
+			if test.expectedConfiguration == nil {
+				assert.Nil(t, configuration)
+			} else {
+				assert.Equal(t, test.expectedConfiguration.Storage, configuration.Storage)
 			}
 		})
 	}

@@ -4,18 +4,18 @@ import (
 	"time"
 
 	"github.com/containous/traefik/log"
-	marathon "github.com/gambol99/go-marathon"
+	"github.com/gambol99/go-marathon"
 )
 
 const (
 	// readinessCheckDefaultTimeout is the default timeout for a readiness
 	// check if no check timeout is specified on the application spec. This
 	// should really never be the case, but better be safe than sorry.
-	readinessCheckDefaultTimeout time.Duration = 10 * time.Second
+	readinessCheckDefaultTimeout = 10 * time.Second
 	// readinessCheckSafetyMargin is some buffer duration to account for
 	// small offsets in readiness check execution.
-	readinessCheckSafetyMargin time.Duration = 5 * time.Second
-	readinessLogHeader         string        = "Marathon readiness check: "
+	readinessCheckSafetyMargin = 5 * time.Second
+	readinessLogHeader         = "Marathon readiness check: "
 )
 
 type readinessChecker struct {

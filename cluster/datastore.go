@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/abronan/valkeyrie/store"
 	"github.com/cenk/backoff"
 	"github.com/containous/staert"
 	"github.com/containous/traefik/job"
 	"github.com/containous/traefik/log"
 	"github.com/containous/traefik/safe"
-	"github.com/docker/libkv/store"
 	"github.com/satori/go.uuid"
 )
 
@@ -76,9 +76,9 @@ func NewDataStore(ctx context.Context, kvSource staert.KvSource, object Object, 
 
 func (d *Datastore) watchChanges() error {
 	stopCh := make(chan struct{})
-	kvCh, err := d.kv.Watch(d.lockKey, stopCh)
+	kvCh, err := d.kv.Watch(d.lockKey, stopCh, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("error while watching key %s: %v", d.lockKey, err)
 	}
 	safe.Go(func() {
 		ctx, cancel := context.WithCancel(d.ctx)
@@ -119,19 +119,8 @@ func (d *Datastore) watchChanges() error {
 
 func (d *Datastore) reload() error {
 	log.Debug("Datastore reload")
-	d.localLock.Lock()
-	err := d.kv.LoadConfig(d.meta)
-	if err != nil {
-		d.localLock.Unlock()
-		return err
-	}
-	err = d.meta.unmarshall()
-	if err != nil {
-		d.localLock.Unlock()
-		return err
-	}
-	d.localLock.Unlock()
-	return nil
+	_, err := d.Load()
+	return err
 }
 
 // Begin creates a transaction with the KV store.
@@ -163,7 +152,7 @@ func (d *Datastore) Begin() (Transaction, Object, error) {
 	operation := func() error {
 		meta := d.get()
 		if meta.Lock != id {
-			return fmt.Errorf("Object lock value: expected %s, got %s", id, meta.Lock)
+			return fmt.Errorf("object lock value: expected %s, got %s", id, meta.Lock)
 		}
 		return nil
 	}
@@ -178,7 +167,7 @@ func (d *Datastore) Begin() (Transaction, Object, error) {
 	ebo.MaxElapsedTime = 60 * time.Second
 	err = backoff.RetryNotify(safe.OperationWithRecover(operation), ebo, notify)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Datastore cannot sync: %v", err)
+		return nil, nil, fmt.Errorf("datastore cannot sync: %v", err)
 	}
 
 	// we synced with KV store, we can now return Setter
@@ -199,6 +188,10 @@ func (d *Datastore) get() *Metadata {
 func (d *Datastore) Load() (Object, error) {
 	d.localLock.Lock()
 	defer d.localLock.Unlock()
+
+	// clear Object first, as mapstructure's decoder doesn't have ZeroFields set to true for merging purposes
+	d.meta.Object = d.meta.Object[:0]
+
 	err := d.kv.LoadConfig(d.meta)
 	if err != nil {
 		return nil, err
@@ -231,21 +224,21 @@ func (s *datastoreTransaction) Commit(object Object) error {
 	s.localLock.Lock()
 	defer s.localLock.Unlock()
 	if s.dirty {
-		return fmt.Errorf("Transaction already used, please begin a new one")
+		return fmt.Errorf("transaction already used, please begin a new one")
 	}
 	s.Datastore.meta.object = object
 	err := s.Datastore.meta.Marshall()
 	if err != nil {
-		return fmt.Errorf("Marshall error: %s", err)
+		return fmt.Errorf("marshall error: %s", err)
 	}
 	err = s.kv.StoreConfig(s.Datastore.meta)
 	if err != nil {
-		return fmt.Errorf("StoreConfig error: %s", err)
+		return fmt.Errorf("storeConfig error: %s", err)
 	}
 
 	err = s.remoteLock.Unlock()
 	if err != nil {
-		return fmt.Errorf("Unlock error: %s", err)
+		return fmt.Errorf("unlock error: %s", err)
 	}
 
 	s.dirty = true

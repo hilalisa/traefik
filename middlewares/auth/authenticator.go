@@ -8,6 +8,8 @@ import (
 
 	goauth "github.com/abbot/go-http-auth"
 	"github.com/containous/traefik/log"
+	"github.com/containous/traefik/middlewares/accesslog"
+	"github.com/containous/traefik/middlewares/tracing"
 	"github.com/containous/traefik/types"
 	"github.com/urfave/negroni"
 )
@@ -18,55 +20,111 @@ type Authenticator struct {
 	users   map[string]string
 }
 
-// NewAuthenticator builds a new Autenticator given a config
-func NewAuthenticator(authConfig *types.Auth) (*Authenticator, error) {
+type tracingAuthenticator struct {
+	name           string
+	handler        negroni.Handler
+	clientSpanKind bool
+}
+
+const (
+	authorizationHeader = "Authorization"
+)
+
+// NewAuthenticator builds a new Authenticator given a config
+func NewAuthenticator(authConfig *types.Auth, tracingMiddleware *tracing.Tracing) (*Authenticator, error) {
 	if authConfig == nil {
-		return nil, fmt.Errorf("Error creating Authenticator: auth is nil")
+		return nil, fmt.Errorf("error creating Authenticator: auth is nil")
 	}
+
 	var err error
-	authenticator := Authenticator{}
+	authenticator := &Authenticator{}
+	tracingAuth := tracingAuthenticator{}
+
 	if authConfig.Basic != nil {
 		authenticator.users, err = parserBasicUsers(authConfig.Basic)
 		if err != nil {
 			return nil, err
 		}
-		basicAuth := goauth.NewBasicAuthenticator("traefik", authenticator.secretBasic)
-		authenticator.handler = negroni.HandlerFunc(func(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
-			if username := basicAuth.CheckAuth(r); username == "" {
-				log.Debug("Basic auth failed...")
-				basicAuth.RequireAuth(w, r)
-			} else {
-				log.Debug("Basic auth success...")
-				if authConfig.HeaderField != "" {
-					r.Header[authConfig.HeaderField] = []string{username}
-				}
-				next.ServeHTTP(w, r)
-			}
-		})
+		realm := "traefik"
+		if authConfig.Basic.Realm != "" {
+			realm = authConfig.Basic.Realm
+		}
+		basicAuth := goauth.NewBasicAuthenticator(realm, authenticator.secretBasic)
+		tracingAuth.handler = createAuthBasicHandler(basicAuth, authConfig)
+		tracingAuth.name = "Auth Basic"
+		tracingAuth.clientSpanKind = false
 	} else if authConfig.Digest != nil {
 		authenticator.users, err = parserDigestUsers(authConfig.Digest)
 		if err != nil {
 			return nil, err
 		}
+
 		digestAuth := goauth.NewDigestAuthenticator("traefik", authenticator.secretDigest)
-		authenticator.handler = negroni.HandlerFunc(func(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
-			if username, _ := digestAuth.CheckAuth(r); username == "" {
-				log.Debug("Digest auth failed...")
-				digestAuth.RequireAuth(w, r)
-			} else {
-				log.Debug("Digest auth success...")
-				if authConfig.HeaderField != "" {
-					r.Header[authConfig.HeaderField] = []string{username}
-				}
-				next.ServeHTTP(w, r)
-			}
-		})
+		tracingAuth.handler = createAuthDigestHandler(digestAuth, authConfig)
+		tracingAuth.name = "Auth Digest"
+		tracingAuth.clientSpanKind = false
 	} else if authConfig.Forward != nil {
-		authenticator.handler = negroni.HandlerFunc(func(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
-			Forward(authConfig.Forward, w, r, next)
-		})
+		tracingAuth.handler = createAuthForwardHandler(authConfig)
+		tracingAuth.name = "Auth Forward"
+		tracingAuth.clientSpanKind = true
 	}
-	return &authenticator, nil
+
+	if tracingMiddleware != nil {
+		authenticator.handler = tracingMiddleware.NewNegroniHandlerWrapper(tracingAuth.name, tracingAuth.handler, tracingAuth.clientSpanKind)
+	} else {
+		authenticator.handler = tracingAuth.handler
+	}
+	return authenticator, nil
+}
+
+func createAuthForwardHandler(authConfig *types.Auth) negroni.HandlerFunc {
+	return negroni.HandlerFunc(func(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+		Forward(authConfig.Forward, w, r, next)
+	})
+}
+func createAuthDigestHandler(digestAuth *goauth.DigestAuth, authConfig *types.Auth) negroni.HandlerFunc {
+	return negroni.HandlerFunc(func(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+		if username, _ := digestAuth.CheckAuth(r); username == "" {
+			log.Debugf("Digest auth failed")
+			digestAuth.RequireAuth(w, r)
+		} else {
+			log.Debugf("Digest auth succeeded")
+
+			// set username in request context
+			r = accesslog.WithUserName(r, username)
+
+			if authConfig.HeaderField != "" {
+				r.Header[authConfig.HeaderField] = []string{username}
+			}
+			if authConfig.Digest.RemoveHeader {
+				log.Debugf("Remove the Authorization header from the Digest auth")
+				r.Header.Del(authorizationHeader)
+			}
+			next.ServeHTTP(w, r)
+		}
+	})
+}
+func createAuthBasicHandler(basicAuth *goauth.BasicAuth, authConfig *types.Auth) negroni.HandlerFunc {
+	return negroni.HandlerFunc(func(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+		if username := basicAuth.CheckAuth(r); username == "" {
+			log.Debugf("Basic auth failed")
+			basicAuth.RequireAuth(w, r)
+		} else {
+			log.Debugf("Basic auth succeeded")
+
+			// set username in request context
+			r = accesslog.WithUserName(r, username)
+
+			if authConfig.HeaderField != "" {
+				r.Header[authConfig.HeaderField] = []string{username}
+			}
+			if authConfig.Basic.RemoveHeader {
+				log.Debugf("Remove the Authorization header from the Basic auth")
+				r.Header.Del(authorizationHeader)
+			}
+			next.ServeHTTP(w, r)
+		}
+	})
 }
 
 func getLinesFromFile(filename string) ([]string, error) {

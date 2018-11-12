@@ -3,6 +3,7 @@ package integration
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"syscall"
@@ -28,7 +29,7 @@ func (s *SimpleSuite) TestInvalidConfigShouldFail(c *check.C) {
 		actual := output.String()
 
 		if !strings.Contains(actual, expected) {
-			return fmt.Errorf("Got %s, wanted %s", actual, expected)
+			return fmt.Errorf("got %s, wanted %s", actual, expected)
 		}
 
 		return nil
@@ -68,11 +69,11 @@ func (s *SimpleSuite) TestDefaultEntryPoints(c *check.C) {
 	defer cmd.Process.Kill()
 
 	err = try.Do(500*time.Millisecond, func() error {
-		expected := "\"DefaultEntryPoints\":[\"http\"]"
+		expected := `\"DefaultEntryPoints\":[\"http\"]`
 		actual := output.String()
 
 		if !strings.Contains(actual, expected) {
-			return fmt.Errorf("Got %s, wanted %s", actual, expected)
+			return fmt.Errorf("got %s, wanted %s", actual, expected)
 		}
 
 		return nil
@@ -93,10 +94,10 @@ func (s *SimpleSuite) TestPrintHelp(c *check.C) {
 		actual := output.String()
 
 		if strings.Contains(actual, notExpected) {
-			return fmt.Errorf("Got %s", actual)
+			return fmt.Errorf("got %s", actual)
 		}
 		if !strings.Contains(actual, expected) {
-			return fmt.Errorf("Got %s, wanted %s", actual, expected)
+			return fmt.Errorf("got %s, wanted %s", actual, expected)
 		}
 
 		return nil
@@ -128,6 +129,10 @@ func (s *SimpleSuite) TestRequestAcceptGraceTimeout(c *check.C) {
 	err = try.GetRequest("http://127.0.0.1:8000/service", 3*time.Second, try.StatusCodeIs(http.StatusOK))
 	c.Assert(err, checker.IsNil)
 
+	// Check that /ping endpoint is responding with 200.
+	err = try.GetRequest("http://127.0.0.1:8001/ping", 3*time.Second, try.StatusCodeIs(http.StatusOK))
+	c.Assert(err, checker.IsNil)
+
 	// Send SIGTERM to Traefik.
 	proc, err := os.FindProcess(cmd.Process.Pid)
 	c.Assert(err, checker.IsNil)
@@ -142,6 +147,12 @@ func (s *SimpleSuite) TestRequestAcceptGraceTimeout(c *check.C) {
 	c.Assert(err, checker.IsNil)
 	defer resp.Body.Close()
 	c.Assert(resp.StatusCode, checker.Equals, http.StatusOK)
+
+	// ping endpoint should now return a Service Unavailable.
+	resp, err = http.Get("http://127.0.0.1:8001/ping")
+	c.Assert(err, checker.IsNil)
+	defer resp.Body.Close()
+	c.Assert(resp.StatusCode, checker.Equals, http.StatusServiceUnavailable)
 
 	// Expect Traefik to shut down gracefully once the request accepting grace
 	// period has elapsed.
@@ -161,4 +172,294 @@ func (s *SimpleSuite) TestRequestAcceptGraceTimeout(c *check.C) {
 		// this point.
 		c.Fatal("Traefik did not terminate in time")
 	}
+}
+
+func (s *SimpleSuite) TestApiOnSameEntryPoint(c *check.C) {
+	s.createComposeProject(c, "base")
+	s.composeProject.Start(c)
+
+	cmd, output := s.traefikCmd("--defaultEntryPoints=http", "--entryPoints=Name:http Address::8000", "--api.entryPoint=http", "--debug", "--docker")
+	defer output(c)
+
+	err := cmd.Start()
+	c.Assert(err, checker.IsNil)
+	defer cmd.Process.Kill()
+
+	// TODO validate : run on 80
+	// Expected a 404 as we did not configure anything
+	err = try.GetRequest("http://127.0.0.1:8000/test", 1*time.Second, try.StatusCodeIs(http.StatusNotFound))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8000/api", 1*time.Second, try.StatusCodeIs(http.StatusOK))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8000/api/providers", 1*time.Second, try.BodyContains("PathPrefix"))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8000/whoami", 1*time.Second, try.StatusCodeIs(http.StatusOK))
+	c.Assert(err, checker.IsNil)
+}
+
+func (s *SimpleSuite) TestStatsWithMultipleEntryPoint(c *check.C) {
+	s.createComposeProject(c, "stats")
+	s.composeProject.Start(c)
+
+	whoami1 := "http://" + s.composeProject.Container(c, "whoami1").NetworkSettings.IPAddress + ":80"
+	whoami2 := "http://" + s.composeProject.Container(c, "whoami2").NetworkSettings.IPAddress + ":80"
+
+	file := s.adaptFile(c, "fixtures/simple_stats.toml", struct {
+		Server1 string
+		Server2 string
+	}{whoami1, whoami2})
+	cmd, output := s.traefikCmd(withConfigFile(file))
+	defer output(c)
+
+	err := cmd.Start()
+	c.Assert(err, checker.IsNil)
+	defer cmd.Process.Kill()
+
+	err = try.GetRequest("http://127.0.0.1:8080/api", 1*time.Second, try.StatusCodeIs(http.StatusOK))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8080/api/providers", 1*time.Second, try.BodyContains("PathPrefix"))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8000/whoami", 1*time.Second, try.StatusCodeIs(http.StatusOK))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8080/whoami", 1*time.Second, try.StatusCodeIs(http.StatusOK))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8080/health", 1*time.Second, try.BodyContains(`"total_status_code_count":{"200":2}`))
+	c.Assert(err, checker.IsNil)
+
+}
+
+func (s *SimpleSuite) TestNoAuthOnPing(c *check.C) {
+	s.createComposeProject(c, "base")
+	s.composeProject.Start(c)
+
+	cmd, output := s.traefikCmd(withConfigFile("./fixtures/simple_auth.toml"))
+	defer output(c)
+
+	err := cmd.Start()
+	c.Assert(err, checker.IsNil)
+	defer cmd.Process.Kill()
+
+	err = try.GetRequest("http://127.0.0.1:8001/api", 1*time.Second, try.StatusCodeIs(http.StatusUnauthorized))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8001/ping", 1*time.Second, try.StatusCodeIs(http.StatusOK))
+	c.Assert(err, checker.IsNil)
+}
+
+func (s *SimpleSuite) TestDefaultEntrypointHTTP(c *check.C) {
+	s.createComposeProject(c, "base")
+	s.composeProject.Start(c)
+
+	cmd, output := s.traefikCmd("--entryPoints=Name:http Address::8000", "--debug", "--docker", "--api")
+	defer output(c)
+
+	err := cmd.Start()
+	c.Assert(err, checker.IsNil)
+	defer cmd.Process.Kill()
+
+	err = try.GetRequest("http://127.0.0.1:8080/api/providers", 1*time.Second, try.BodyContains("PathPrefix"))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8000/whoami", 1*time.Second, try.StatusCodeIs(http.StatusOK))
+	c.Assert(err, checker.IsNil)
+}
+
+func (s *SimpleSuite) TestWithUnexistingEntrypoint(c *check.C) {
+	s.createComposeProject(c, "base")
+	s.composeProject.Start(c)
+
+	cmd, output := s.traefikCmd("--defaultEntryPoints=https,http", "--entryPoints=Name:http Address::8000", "--debug", "--docker", "--api")
+	defer output(c)
+
+	err := cmd.Start()
+	c.Assert(err, checker.IsNil)
+	defer cmd.Process.Kill()
+
+	err = try.GetRequest("http://127.0.0.1:8080/api/providers", 1*time.Second, try.BodyContains("PathPrefix"))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8000/whoami", 1*time.Second, try.StatusCodeIs(http.StatusOK))
+	c.Assert(err, checker.IsNil)
+}
+
+func (s *SimpleSuite) TestMetricsPrometheusDefaultEntrypoint(c *check.C) {
+	s.createComposeProject(c, "base")
+	s.composeProject.Start(c)
+
+	cmd, output := s.traefikCmd("--defaultEntryPoints=http", "--entryPoints=Name:http Address::8000", "--api", "--metrics.prometheus.buckets=0.1,0.3,1.2,5.0", "--docker", "--debug")
+	defer output(c)
+
+	err := cmd.Start()
+	c.Assert(err, checker.IsNil)
+	defer cmd.Process.Kill()
+
+	err = try.GetRequest("http://127.0.0.1:8080/api/providers", 1*time.Second, try.BodyContains("PathPrefix"))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8000/whoami", 1*time.Second, try.StatusCodeIs(http.StatusOK))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8080/metrics", 1*time.Second, try.StatusCodeIs(http.StatusOK))
+	c.Assert(err, checker.IsNil)
+}
+
+func (s *SimpleSuite) TestMultipleProviderSameBackendName(c *check.C) {
+	s.createComposeProject(c, "base")
+	s.composeProject.Start(c)
+
+	ipWhoami01 := s.composeProject.Container(c, "whoami1").NetworkSettings.IPAddress
+	ipWhoami02 := s.composeProject.Container(c, "whoami2").NetworkSettings.IPAddress
+	file := s.adaptFile(c, "fixtures/multiple_provider.toml", struct{ IP string }{
+		IP: ipWhoami02,
+	})
+	defer os.Remove(file)
+
+	cmd, output := s.traefikCmd(withConfigFile(file))
+	defer output(c)
+
+	err := cmd.Start()
+	c.Assert(err, checker.IsNil)
+	defer cmd.Process.Kill()
+
+	err = try.GetRequest("http://127.0.0.1:8080/api/providers", 1*time.Second, try.BodyContains("PathPrefix"))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8000/whoami", 1*time.Second, try.BodyContains(ipWhoami01))
+	c.Assert(err, checker.IsNil)
+
+	err = try.GetRequest("http://127.0.0.1:8000/file", 1*time.Second, try.BodyContains(ipWhoami02))
+	c.Assert(err, checker.IsNil)
+
+}
+
+func (s *SimpleSuite) TestIPStrategyWhitelist(c *check.C) {
+	s.createComposeProject(c, "whitelist")
+	s.composeProject.Start(c)
+
+	cmd, output := s.traefikCmd(withConfigFile("fixtures/simple_whitelist.toml"))
+	defer output(c)
+
+	err := cmd.Start()
+	c.Assert(err, checker.IsNil)
+	defer cmd.Process.Kill()
+
+	err = try.GetRequest("http://127.0.0.1:8080/api/providers", 1*time.Second, try.BodyContains("override"))
+	c.Assert(err, checker.IsNil)
+
+	testCases := []struct {
+		desc               string
+		xForwardedFor      string
+		host               string
+		expectedStatusCode int
+	}{
+		{
+			desc:               "default client ip strategy accept",
+			xForwardedFor:      "8.8.8.8,127.0.0.1",
+			host:               "no.override.whitelist.docker.local",
+			expectedStatusCode: 200,
+		},
+		{
+			desc:               "default client ip strategy reject",
+			xForwardedFor:      "8.8.8.10,127.0.0.1",
+			host:               "no.override.whitelist.docker.local",
+			expectedStatusCode: 403,
+		},
+		{
+			desc:               "override remote addr reject",
+			xForwardedFor:      "8.8.8.8,8.8.8.8",
+			host:               "override.remoteaddr.whitelist.docker.local",
+			expectedStatusCode: 403,
+		},
+		{
+			desc:               "override depth accept",
+			xForwardedFor:      "8.8.8.8,10.0.0.1,127.0.0.1",
+			host:               "override.depth.whitelist.docker.local",
+			expectedStatusCode: 200,
+		},
+		{
+			desc:               "override depth reject",
+			xForwardedFor:      "10.0.0.1,8.8.8.8,127.0.0.1",
+			host:               "override.depth.whitelist.docker.local",
+			expectedStatusCode: 403,
+		},
+		{
+			desc:               "override excludedIPs reject",
+			xForwardedFor:      "10.0.0.3,10.0.0.1,10.0.0.2",
+			host:               "override.excludedips.whitelist.docker.local",
+			expectedStatusCode: 403,
+		},
+		{
+			desc:               "override excludedIPs accept",
+			xForwardedFor:      "8.8.8.8,10.0.0.1,10.0.0.2",
+			host:               "override.excludedips.whitelist.docker.local",
+			expectedStatusCode: 200,
+		},
+	}
+
+	for _, test := range testCases {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8000", nil)
+		req.Header.Set("X-Forwarded-For", test.xForwardedFor)
+		req.Host = test.host
+		req.RequestURI = ""
+
+		err = try.Request(req, 1*time.Second, try.StatusCodeIs(test.expectedStatusCode))
+		if err != nil {
+			c.Fatalf("Error while %s: %v", test.desc, err)
+		}
+	}
+}
+
+func (s *SimpleSuite) TestDontKeepTrailingSlash(c *check.C) {
+	file := s.adaptFile(c, "fixtures/keep_trailing_slash.toml", struct {
+		KeepTrailingSlash bool
+	}{false})
+	defer os.Remove(file)
+
+	cmd, output := s.traefikCmd(withConfigFile(file))
+	defer output(c)
+
+	err := cmd.Start()
+	c.Assert(err, checker.IsNil)
+	defer cmd.Process.Kill()
+
+	oldCheckRedirect := http.DefaultClient.CheckRedirect
+	http.DefaultClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	err = try.GetRequest("http://127.0.0.1:8000/test/foo/", 1*time.Second, try.StatusCodeIs(http.StatusMovedPermanently))
+	c.Assert(err, checker.IsNil)
+
+	http.DefaultClient.CheckRedirect = oldCheckRedirect
+}
+
+func (s *SimpleSuite) TestKeepTrailingSlash(c *check.C) {
+	file := s.adaptFile(c, "fixtures/keep_trailing_slash.toml", struct {
+		KeepTrailingSlash bool
+	}{true})
+	defer os.Remove(file)
+
+	cmd, output := s.traefikCmd(withConfigFile(file))
+	defer output(c)
+
+	err := cmd.Start()
+	c.Assert(err, checker.IsNil)
+	defer cmd.Process.Kill()
+
+	oldCheckRedirect := http.DefaultClient.CheckRedirect
+	http.DefaultClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	err = try.GetRequest("http://127.0.0.1:8000/test/foo/", 1*time.Second, try.StatusCodeIs(http.StatusNotFound))
+	c.Assert(err, checker.IsNil)
+
+	http.DefaultClient.CheckRedirect = oldCheckRedirect
 }

@@ -14,12 +14,12 @@ Let's take our example from the [overview](/#overview) again:
 
 > ![Architecture](img/architecture.png)
 
-Let's zoom on Træfik and have an overview of its internal architecture:
+Let's zoom on Traefik and have an overview of its internal architecture:
 
 
 ![Architecture](img/internal.png)
 
-- Incoming requests end on [entrypoints](#entrypoints), as the name suggests, they are the network entry points into Træfik (listening port, SSL, traffic redirection...).
+- Incoming requests end on [entrypoints](#entrypoints), as the name suggests, they are the network entry points into Traefik (listening port, SSL, traffic redirection...).
 - Traffic is then forwarded to a matching [frontend](#frontends). A frontend defines routes from [entrypoints](#entrypoints) to [backends](#backends).
 Routes are created using requests fields (`Host`, `Path`, `Headers`...) and can match or not a request.
 - The [frontend](#frontends) will then send the request to a [backend](#backends). A backend can be composed by one or more [servers](#servers), and by a load-balancing strategy.
@@ -27,7 +27,7 @@ Routes are created using requests fields (`Host`, `Path`, `Headers`...) and can 
 
 ### Entrypoints
 
-Entrypoints are the network entry points into Træfik.
+Entrypoints are the network entry points into Traefik.
 They can be defined using:
 
 - a port (80, 443...)
@@ -62,7 +62,9 @@ And here is another example with client certificate authentication:
   [entryPoints.https]
   address = ":443"
   [entryPoints.https.tls]
-  clientCAFiles = ["tests/clientca1.crt", "tests/clientca2.crt"]
+    [entryPoints.https.tls.ClientCA]
+    files = ["tests/clientca1.crt", "tests/clientca2.crt"]
+    optional = false
     [[entryPoints.https.tls.certificates]]
     certFile = "tests/traefik.crt"
     keyFile = "tests/traefik.key"
@@ -86,6 +88,7 @@ Following is the list of existing modifier rules:
 
 - `AddPrefix: /products`: Add path prefix to the existing request path prior to forwarding the request to the backend.
 - `ReplacePath: /serverless-path`: Replaces the path and adds the old path to the `X-Replaced-Path` header. Useful for mapping to AWS Lambda or Google Cloud Functions.
+- `ReplacePathRegex: ^/api/v2/(.*) /api/$1`: Replaces the path with a regular expression and adds the old path to the `X-Replaced-Path` header. Separate the regular expression and the replacement by a space.
 
 #### Matchers
 
@@ -119,7 +122,7 @@ In order to use regular expressions with Host and Path matchers, you must declar
     The variable has no special meaning; however, it is required by the [gorilla/mux](https://github.com/gorilla/mux) dependency which embeds the regular expression and defines the syntax.
 
 You can optionally enable `passHostHeader` to forward client `Host` header to the backend.
-You can also optionally enable `passTLSCert` to forward TLS Client certificates to the backend.
+You can also optionally configure the `passTLSClientCert` option to pass the Client certificates to the backend in a specific header.
 
 ##### Path Matcher Usage Guidelines
 
@@ -154,7 +157,8 @@ Here is an example of frontends definition:
   [frontends.frontend2]
   backend = "backend1"
   passHostHeader = true
-  passTLSCert = true
+  [frontends.frontend2.passTLSClientCert]
+    pem = true
   priority = 10
   entrypoints = ["https"] # overrides defaultEntryPoints
     [frontends.frontend2.routes.test_1]
@@ -167,7 +171,7 @@ Here is an example of frontends definition:
 
 - Three frontends are defined: `frontend1`, `frontend2` and `frontend3`
 - `frontend1` will forward the traffic to the `backend2` if the rule `Host:test.localhost,test2.localhost` is matched
-- `frontend2` will forward the traffic to the `backend1` if the rule `Host:localhost,{subdomain:[a-z]+}.localhost` is matched (forwarding client `Host` header to the backend)
+- `frontend2` will forward the traffic to the `backend1` if the rule `HostRegexp:localhost,{subdomain:[a-z]+}.localhost` is matched (forwarding client `Host` header to the backend)
 - `frontend3` will forward the traffic to the `backend2` if the rules `Host:test3.localhost` **AND** `Path:/test` are matched
 
 #### Combining multiple rules
@@ -230,32 +234,36 @@ The following rules are both `Matchers` and `Modifiers`, so the `Matcher` portio
 #### Priorities
 
 By default, routes will be sorted (in descending order) using rules length (to avoid path overlap):
-`PathPrefix:/12345` will be matched before `PathPrefix:/1234` that will be matched before `PathPrefix:/1`.
+`PathPrefix:/foo;Host:foo.com` (length == 28) will be matched before `PathPrefixStrip:/foobar` (length == 23) will be matched before `PathPrefix:/foo,/bar` (length == 20).
 
-You can customize priority by frontend:
+You can customize priority by frontend. The priority value override the rule length during sorting:
 
 ```toml
   [frontends]
     [frontends.frontend1]
     backend = "backend1"
-    priority = 10
+    priority = 20
     passHostHeader = true
       [frontends.frontend1.routes.test_1]
       rule = "PathPrefix:/to"
     [frontends.frontend2]
-    priority = 5
     backend = "backend2"
     passHostHeader = true
       [frontends.frontend2.routes.test_1]
       rule = "PathPrefix:/toto"
 ```
 
-Here, `frontend1` will be matched before `frontend2` (`10 > 5`).
+Here, `frontend1` will be matched before `frontend2` (`20 > 16`).
 
 #### Custom headers
 
 Custom headers can be configured through the frontends, to add headers to either requests or responses that match the frontend's rules.
 This allows for setting headers such as `X-Script-Name` to be added to the request, or custom headers to be added to the response.
+
+!!! warning
+    If the custom header name is the same as one header name of the request or response, it will be replaced.
+
+In this example, all matches to the path `/cheese` will have the `X-Script-Name` header added to the proxied request and the `X-Custom-Response-Header` header added to the response.
 
 ```toml
 [frontends]
@@ -269,7 +277,20 @@ This allows for setting headers such as `X-Script-Name` to be added to the reque
     rule = "PathPrefixStrip:/cheese"
 ```
 
-In this example, all matches to the path `/cheese` will have the `X-Script-Name` header added to the proxied request, and the `X-Custom-Response-Header` added to the response.
+In this second  example, all matches to the path `/cheese` will have the `X-Script-Name` header added to the proxied request, the `X-Custom-Request-Header` header removed from the request, and the `X-Custom-Response-Header` header removed from the response.
+
+```toml
+[frontends]
+  [frontends.frontend1]
+  backend = "backend1"
+    [frontends.frontend1.headers.customresponseheaders]
+    X-Custom-Response-Header = ""
+    [frontends.frontend1.headers.customrequestheaders]
+    X-Script-Name = "test"
+    X-Custom-Request-Header = ""
+    [frontends.frontend1.routes.test_1]
+    rule = "PathPrefixStrip:/cheese"
+```
 
 #### Security headers
 
@@ -299,44 +320,58 @@ In this example, traffic routed through the first frontend will have the `X-Fram
 !!! note
     The detailed documentation for those security headers can be found in [unrolled/secure](https://github.com/unrolled/secure#available-options).
 
-#### Rate limiting
-
-Rate limiting can be configured per frontend.  
-Multiple sets of rates can be added to each frontend, but the time periods must be unique.
-
-```toml
-[frontends]
-    [frontends.frontend1]
-    passHostHeader = true
-    entrypoints = ["http"]
-    backend = "backend1"
-        [frontends.frontend1.routes.test_1]
-        rule = "Path:/"
-    [frontends.frontend1.ratelimit]
-    extractorfunc = "client.ip"
-        [frontends.frontend1.ratelimit.rateset.rateset1]
-        period = "10s"
-        average = 100
-        burst = 200
-        [frontends.frontend1.ratelimit.rateset.rateset2]
-        period = "3s"
-        average = 5
-        burst = 10
-```
-
-In the above example, frontend1 is configured to limit requests by the client's ip address.  
-An average of 5 requests every 3 seconds is allowed and an average of 100 requests every 10 seconds.  
-These can "burst" up to 10 and 200 in each period respectively.
-
 ### Backends
 
 A backend is responsible to load-balance the traffic coming from one or more frontends to a set of http servers.
 
+#### Servers
+
+Servers are simply defined using a `url`. You can also apply a custom `weight` to each server (this will be used by load-balancing).
+
+!!! note
+    Paths in `url` are ignored. Use `Modifier` to specify paths instead.
+
+Here is an example of backends and servers definition:
+
+```toml
+[backends]
+  [backends.backend1]
+    # ...
+    [backends.backend1.servers.server1]
+    url = "http://172.17.0.2:80"
+    weight = 10
+    [backends.backend1.servers.server2]
+    url = "http://172.17.0.3:80"
+    weight = 1
+  [backends.backend2]
+    # ...
+    [backends.backend2.servers.server1]
+    url = "https://172.17.0.4:443"
+    weight = 1
+    [backends.backend2.servers.server2]
+    url = "https://172.17.0.5:443"
+    weight = 2
+  [backends.backend3]
+    # ...
+    [backends.backend3.servers.server1]
+    url = "h2c://172.17.0.6:80"
+    weight = 1
+```
+
+- Two backends are defined: `backend1` and `backend2`
+- `backend1` will forward the traffic to two servers: `172.17.0.2:80` with weight `10` and `172.17.0.3:80` with weight `1`.
+- `backend2` will forward the traffic to two servers: `172.17.0.4:443` with weight `1` and `172.17.0.5:443` with weight `2` both using TLS.
+- `backend3` will forward the traffic to: `172.17.0.6:80` with weight `1` using HTTP2 without TLS.
+
+#### Load-balancing
+
 Various methods of load-balancing are supported:
 
-- `wrr`: Weighted Round Robin
+- `wrr`: Weighted Round Robin.
 - `drr`: Dynamic Round Robin: increases weights on servers that perform better than others.
     It also rolls back to original weights if the servers have changed.
+
+#### Circuit breakers
 
 A circuit breaker can also be applied to a backend, preventing high loads on failing servers.
 Initial state is Standby. CB observes the statistics and does not modify the request.
@@ -351,76 +386,9 @@ It can be configured using:
 
 For example:
 
-- `NetworkErrorRatio() > 0.5`: watch error ratio over 10 second sliding window for a frontend
+- `NetworkErrorRatio() > 0.5`: watch error ratio over 10 second sliding window for a frontend.
 - `LatencyAtQuantileMS(50.0) > 50`:  watch latency at quantile in milliseconds.
-- `ResponseCodeRatio(500, 600, 0, 600) > 0.5`: ratio of response codes in range [500-600) to  [0-600)
-
-To proactively prevent backends from being overwhelmed with high load, a maximum connection limit can
-also be applied to each backend.
-
-Maximum connections can be configured by specifying an integer value for `maxconn.amount` and
-`maxconn.extractorfunc` which is a strategy used to determine how to categorize requests in order to
-evaluate the maximum connections.
-
-For example:
-```toml
-[backends]
-  [backends.backend1]
-    [backends.backend1.maxconn]
-       amount = 10
-       extractorfunc = "request.host"
-```
-
-- `backend1` will return `HTTP code 429 Too Many Requests` if there are already 10 requests in progress for the same Host header.
-- Another possible value for `extractorfunc` is `client.ip` which will categorize requests based on client source ip.
-- Lastly `extractorfunc` can take the value of `request.header.ANY_HEADER` which will categorize requests based on `ANY_HEADER` that you provide.
-
-Sticky sessions are supported with both load balancers.  
-When sticky sessions are enabled, a cookie called `_TRAEFIK_BACKEND` is set on the initial request.
-On subsequent requests, the client will be directed to the backend stored in the cookie if it is still healthy.
-If not, a new backend will be assigned.
-
-For example:
-```toml
-[backends]
-  [backends.backend1]
-    [backends.backend1.loadbalancer]
-      sticky = true
-```
-
-A health check can be configured in order to remove a backend from LB rotation as long as it keeps returning HTTP status codes other than `200 OK` to HTTP GET requests periodically carried out by Traefik.  
-The check is defined by a pathappended to the backend URL and an interval (given in a format understood by [time.ParseDuration](https://golang.org/pkg/time/#ParseDuration)) specifying how often the health check should be executed (the default being 30 seconds).
-Each backend must respond to the health check within 5 seconds.  
-By default, the port of the backend server is used, however, this may be overridden.
-
-A recovering backend returning 200 OK responses again is being returned to the
-LB rotation pool.
-
-For example:
-```toml
-[backends]
-  [backends.backend1]
-    [backends.backend1.healthcheck]
-    path = "/health"
-    interval = "10s"
-```
-
-To use a different port for the healthcheck:
-```toml
-[backends]
-  [backends.backend1]
-    [backends.backend1.healthcheck]
-    path = "/health"
-    interval = "10s"
-    port = 8080
-```
-
-### Servers
-
-Servers are simply defined using a `url`. You can also apply a custom `weight` to each server (this will be used by load-balancing).
-
-!!! note
-    Paths in `url` are ignored. Use `Modifier` to specify paths instead.
+- `ResponseCodeRatio(500, 600, 0, 600) > 0.5`: ratio of response codes in ranges [500-600) and [0-600).
 
 Here is an example of backends and servers definition:
 
@@ -435,35 +403,124 @@ Here is an example of backends and servers definition:
     [backends.backend1.servers.server2]
     url = "http://172.17.0.3:80"
     weight = 1
-  [backends.backend2]
-    [backends.backend2.LoadBalancer]
-    method = "drr"
-    [backends.backend2.servers.server1]
-    url = "http://172.17.0.4:80"
-    weight = 1
-    [backends.backend2.servers.server2]
-    url = "http://172.17.0.5:80"
-    weight = 2
 ```
 
-- Two backends are defined: `backend1` and `backend2`
 - `backend1` will forward the traffic to two servers: `http://172.17.0.2:80"` with weight `10` and `http://172.17.0.3:80` with weight `1` using default `wrr` load-balancing strategy.
-- `backend2` will forward the traffic to two servers: `http://172.17.0.4:80"` with weight `1` and `http://172.17.0.5:80` with weight `2` using `drr` load-balancing strategy.
 - a circuit breaker is added on `backend1` using the expression `NetworkErrorRatio() > 0.5`: watch error ratio over 10 second sliding window
 
+#### Maximum connections
+
+To proactively prevent backends from being overwhelmed with high load, a maximum connection limit can also be applied to each backend.
+
+Maximum connections can be configured by specifying an integer value for `maxconn.amount` and `maxconn.extractorfunc` which is a strategy used to determine how to categorize requests in order to evaluate the maximum connections.
+
+For example:
+```toml
+[backends]
+  [backends.backend1]
+    [backends.backend1.maxconn]
+       amount = 10
+       extractorfunc = "request.host"
+   # ...
+```
+
+- `backend1` will return `HTTP code 429 Too Many Requests` if there are already 10 requests in progress for the same Host header.
+- Another possible value for `extractorfunc` is `client.ip` which will categorize requests based on client source ip.
+- Lastly `extractorfunc` can take the value of `request.header.ANY_HEADER` which will categorize requests based on `ANY_HEADER` that you provide.
+
+#### Sticky sessions
+
+Sticky sessions are supported with both load balancers.  
+When sticky sessions are enabled, a cookie is set on the initial request.
+The default cookie name is an abbreviation of a sha1 (ex: `_1d52e`).
+On subsequent requests, the client will be directed to the backend stored in the cookie if it is still healthy.
+If not, a new backend will be assigned.
+
+```toml
+[backends]
+  [backends.backend1]
+    # Enable sticky session
+    [backends.backend1.loadbalancer.stickiness]
+
+    # Customize the cookie name
+    #
+    # Optional
+    # Default: a sha1 (6 chars)
+    #
+    #  cookieName = "my_cookie"
+```
+
+#### Health Check
+
+A health check can be configured in order to remove a backend from LB rotation as long as it keeps returning HTTP status codes other than `2xx` or `3xx` to HTTP GET requests periodically carried out by Traefik.
+The check is defined by a path appended to the backend URL and an interval specifying how often the health check should be executed (the default being 30 seconds.)
+Each backend must respond to the health check within a timeout duration (the default being 5 seconds.)
+Interval and timeout are to be given in a format understood by [time.ParseDuration](https://golang.org/pkg/time/#ParseDuration).
+The interval must be greater than the timeout. If configuration doesn't reflect this, the interval will be set to timeout + 1 second.
+By default, the port of the backend server is used, however, this may be overridden.
+
+A recovering backend returning `2xx` or `3xx` responses again is being returned to the LB rotation pool.
+
+For example:
+```toml
+[backends]
+  [backends.backend1]
+    [backends.backend1.healthcheck]
+    path = "/health"
+    interval = "10s"
+    timeout = "3s"
+```
+
+To use a different port for the health check:
+```toml
+[backends]
+  [backends.backend1]
+    [backends.backend1.healthcheck]
+    path = "/health"
+    interval = "10s"
+    timeout = "3s"
+    port = 8080
+```
+
+
+To use a different scheme for the health check:
+```toml
+[backends]
+  [backends.backend1]
+    [backends.backend1.healthcheck]
+    path = "/health"
+    interval = "10s"
+    timeout = "3s"
+    scheme = "http"
+```
+
+Additional http headers and hostname to health check request can be specified, for instance:
+```toml
+[backends]
+  [backends.backend1]
+    [backends.backend1.healthcheck]
+    path = "/health"
+    interval = "10s"
+    timeout = "3s"
+    hostname = "myhost.com"
+    port = 8080
+      [backends.backend1.healthcheck.headers]
+      My-Custom-Header = "foo"
+      My-Header = "bar"
+```
 
 ## Configuration
 
-Træfik's configuration has two parts:
+Traefik's configuration has two parts:
 
-- The [static Træfik configuration](/basics#static-trfk-configuration) which is loaded only at the beginning.
-- The [dynamic Træfik configuration](/basics#dynamic-trfk-configuration) which can be hot-reloaded (no need to restart the process).
+- The [static Traefik configuration](/basics#static-traefik-configuration) which is loaded only at the beginning.
+- The [dynamic Traefik configuration](/basics#dynamic-traefik-configuration) which can be hot-reloaded (no need to restart the process).
 
-### Static Træfik configuration
+### Static Traefik configuration
 
 The static configuration is the global configuration which is setting up connections to configuration backends and entrypoints.
 
-Træfik can be configured using many configuration sources with the following precedence order.
+Traefik can be configured using many configuration sources with the following precedence order.
 Each item takes precedence over the item below it:
 
 - [Key-value store](/basics/#key-value-stores)
@@ -473,13 +530,13 @@ Each item takes precedence over the item below it:
 
 It means that arguments override configuration file, and key-value store overrides arguments.
 
-!!! note 
+!!! note
     the provider-enabling argument parameters (e.g., `--docker`) set all default values for the specific provider.  
     It must not be used if a configuration source with less precedence wants to set a non-default provider value.
 
 #### Configuration file
 
-By default, Træfik will try to find a `traefik.toml` in the following places:
+By default, Traefik will try to find a `traefik.toml` in the following places:
 
 - `/etc/traefik/`
 - `$HOME/.traefik/`
@@ -505,7 +562,7 @@ Note that all default values will be displayed as well.
 
 #### Key-value stores
 
-Træfik supports several Key-value stores:
+Traefik supports several Key-value stores:
 
 - [Consul](https://consul.io)
 - [etcd](https://coreos.com/etcd/)
@@ -514,17 +571,18 @@ Træfik supports several Key-value stores:
 
 Please refer to the [User Guide Key-value store configuration](/user-guide/kv-config/) section to get documentation on it.
 
-### Dynamic Træfik configuration
+### Dynamic Traefik configuration
 
 The dynamic configuration concerns :
 
 - [Frontends](/basics/#frontends)
 - [Backends](/basics/#backends)
 - [Servers](/basics/#servers)
+- HTTPS Certificates
 
-Træfik can hot-reload those rules which could be provided by [multiple configuration backends](/configuration/commons).
+Traefik can hot-reload those rules which could be provided by [multiple configuration backends](/configuration/commons).
 
-We only need to enable `watch` option to make Træfik watch configuration backend changes and generate its configuration automatically.
+We only need to enable `watch` option to make Traefik watch configuration backend changes and generate its configuration automatically.
 Routes to services will be created and updated instantly at any changes.
 
 Please refer to the [configuration backends](/configuration/commons) section to get documentation on it.
@@ -538,10 +596,10 @@ Usage:
 traefik [command] [--flag=flag_argument]
 ```
 
-List of Træfik available commands with description :
+List of Traefik available commands with description :
 
 - `version` : Print version
-- `storeconfig` : Store the static Traefik configuration into a Key-value stores. Please refer to the [Store Træfik configuration](/user-guide/kv-config/#store-trfk-configuration) section to get documentation on it.
+- `storeconfig` : Store the static Traefik configuration into a Key-value stores. Please refer to the [Store Traefik configuration](/user-guide/kv-config/#store-configuration-in-key-value-store) section to get documentation on it.
 - `bug`: The easiest way to submit a pre-filled issue.
 - `healthcheck`: Calls Traefik `/ping` to check health.
 
@@ -557,11 +615,16 @@ Each command is described at the beginning of the help section:
 
 ```bash
 traefik --help
+
+# or
+
+docker run traefik[:version] --help
+# ex: docker run traefik:1.5 --help
 ```
 
 ### Command: bug
 
-Here is the easiest way to submit a pre-filled issue on [Træfik GitHub](https://github.com/containous/traefik).
+Here is the easiest way to submit a pre-filled issue on [Traefik GitHub](https://github.com/containous/traefik).
 
 ```bash
 traefik bug
@@ -576,11 +639,129 @@ This command allows to check the health of Traefik. Its exit status is `0` if Tr
 This can be used with Docker [HEALTHCHECK](https://docs.docker.com/engine/reference/builder/#healthcheck) instruction or any other health check orchestration mechanism.
 
 !!! note
-    The [`web` provider](/configuration/backends/web) must be enabled to allow `/ping` calls by the `healthcheck` command.
+    The [`ping`](/configuration/ping) must be enabled to allow the `healthcheck` command to call `/ping`.
 
 ```bash
 traefik healthcheck
 ```
 ```bash
 OK: http://:8082/ping
+```
+
+
+## Collected Data
+
+**This feature is disabled by default.**
+
+You can read the public proposal on this topic [here](https://github.com/containous/traefik/issues/2369).
+
+### Why ?
+
+In order to help us learn more about how Traefik is being used and improve it, we collect anonymous usage statistics from running instances.
+Those data help us prioritize our developments and focus on what's more important (for example, which configuration backend is used and which is not used).
+
+### What ?
+
+Once a day (the first call begins 10 minutes after the start of Traefik), we collect:
+
+- the Traefik version
+- a hash of the configuration
+- an **anonymous version** of the static configuration:
+    - token, user name, password, URL, IP, domain, email, etc, are removed
+
+!!! note
+    We do not collect the dynamic configuration (frontends & backends).
+
+!!! note
+    We do not collect data behind the scenes to run advertising programs or to sell such data to third-party.
+
+#### Here is an example
+
+- Source configuration:
+
+```toml
+[entryPoints]
+    [entryPoints.http]
+       address = ":80"
+
+[api]
+
+[Docker]
+  endpoint = "tcp://10.10.10.10:2375"
+  domain = "foo.bir"
+  exposedByDefault = true
+  swarmMode = true
+
+  [Docker.TLS]
+    ca = "dockerCA"
+    cert = "dockerCert"
+    key = "dockerKey"
+    insecureSkipVerify = true
+
+[ECS]
+  domain = "foo.bar"
+  exposedByDefault = true
+  clusters = ["foo-bar"]
+  region = "us-west-2"
+  accessKeyID = "AccessKeyID"
+  secretAccessKey = "SecretAccessKey"
+```
+
+- Obfuscated and anonymous configuration:
+
+```toml
+[entryPoints]
+    [entryPoints.http]
+       address = ":80"
+
+[api]
+
+[Docker]
+  endpoint = "xxxx"
+  domain = "xxxx"
+  exposedByDefault = true
+  swarmMode = true
+
+  [Docker.TLS]
+    ca = "xxxx"
+    cert = "xxxx"
+    key = "xxxx"
+    insecureSkipVerify = false
+
+[ECS]
+  domain = "xxxx"
+  exposedByDefault = true
+  clusters = []
+  region = "us-west-2"
+  accessKeyID = "xxxx"
+  secretAccessKey = "xxxx"
+```
+
+### Show me the code !
+
+If you want to dig into more details, here is the source code of the collecting system: [collector.go](https://github.com/containous/traefik/blob/master/collector/collector.go)
+
+By default we anonymize all configuration fields, except fields tagged with `export=true`.
+
+You can check all fields in the [godoc](https://godoc.org/github.com/containous/traefik/configuration#GlobalConfiguration).
+
+### How to enable this ?
+
+You can enable the collecting system by:
+
+- adding this line in the configuration TOML file:
+
+```toml
+# Send anonymous usage data
+#
+# Optional
+# Default: false
+#
+sendAnonymousUsage = true
+```
+
+- adding this flag in the CLI:
+
+```bash
+./traefik --sendAnonymousUsage=true
 ```

@@ -1,4 +1,4 @@
-// package connlimit provides control over simultaneous connections coming from the same source
+// Package connlimit provides control over simultaneous connections coming from the same source
 package connlimit
 
 import (
@@ -6,10 +6,11 @@ import (
 	"net/http"
 	"sync"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/vulcand/oxy/utils"
 )
 
-// Limiter tracks concurrent connection per token
+// ConnLimiter tracks concurrent connection per token
 // and is capable of rejecting connections if they are failed
 type ConnLimiter struct {
 	mutex            *sync.Mutex
@@ -20,9 +21,10 @@ type ConnLimiter struct {
 	next             http.Handler
 
 	errHandler utils.ErrorHandler
-	log        utils.Logger
+	log        *log.Logger
 }
 
+// New creates a new ConnLimiter
 func New(next http.Handler, extract utils.SourceExtractor, maxConnections int64, options ...ConnLimitOption) (*ConnLimiter, error) {
 	if extract == nil {
 		return nil, fmt.Errorf("Extract function can not be nil")
@@ -33,6 +35,7 @@ func New(next http.Handler, extract utils.SourceExtractor, maxConnections int64,
 		maxConnections: maxConnections,
 		connections:    make(map[string]int64),
 		next:           next,
+		log:            log.StandardLogger(),
 	}
 
 	for _, o := range options {
@@ -40,15 +43,25 @@ func New(next http.Handler, extract utils.SourceExtractor, maxConnections int64,
 			return nil, err
 		}
 	}
-	if cl.log == nil {
-		cl.log = utils.NullLogger
-	}
 	if cl.errHandler == nil {
-		cl.errHandler = defaultErrHandler
+		cl.errHandler = &ConnErrHandler{
+			log: cl.log,
+		}
 	}
 	return cl, nil
 }
 
+// Logger defines the logger the connection limiter will use.
+//
+// It defaults to logrus.StandardLogger(), the global logger used by logrus.
+func Logger(l *log.Logger) ConnLimitOption {
+	return func(cl *ConnLimiter) error {
+		cl.log = l
+		return nil
+	}
+}
+
+// Wrap sets the next handler to be called by connexion limiter handler.
 func (cl *ConnLimiter) Wrap(h http.Handler) {
 	cl.next = h
 }
@@ -61,7 +74,7 @@ func (cl *ConnLimiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := cl.acquire(token, amount); err != nil {
-		cl.log.Infof("limiting request source %s: %v", token, err)
+		cl.log.Debugf("limiting request source %s: %v", token, err)
 		cl.errHandler.ServeHTTP(w, r, err)
 		return
 	}
@@ -81,7 +94,7 @@ func (cl *ConnLimiter) acquire(token string, amount int64) error {
 	}
 
 	cl.connections[token] += amount
-	cl.totalConnections += int64(amount)
+	cl.totalConnections += amount
 	return nil
 }
 
@@ -90,7 +103,7 @@ func (cl *ConnLimiter) release(token string, amount int64) {
 	defer cl.mutex.Unlock()
 
 	cl.connections[token] -= amount
-	cl.totalConnections -= int64(amount)
+	cl.totalConnections -= amount
 
 	// Otherwise it would grow forever
 	if cl.connections[token] == 0 {
@@ -98,6 +111,7 @@ func (cl *ConnLimiter) release(token string, amount int64) {
 	}
 }
 
+// MaxConnError maximum connections reached error
 type MaxConnError struct {
 	max int64
 }
@@ -106,10 +120,18 @@ func (m *MaxConnError) Error() string {
 	return fmt.Sprintf("max connections reached: %d", m.max)
 }
 
+// ConnErrHandler connection limiter error handler
 type ConnErrHandler struct {
+	log *log.Logger
 }
 
 func (e *ConnErrHandler) ServeHTTP(w http.ResponseWriter, req *http.Request, err error) {
+	if e.log.Level >= log.DebugLevel {
+		logEntry := e.log.WithField("Request", utils.DumpHttpRequest(req))
+		logEntry.Debug("vulcand/oxy/connlimit: begin ServeHttp on request")
+		defer logEntry.Debug("vulcand/oxy/connlimit: completed ServeHttp on request")
+	}
+
 	if _, ok := err.(*MaxConnError); ok {
 		w.WriteHeader(429)
 		w.Write([]byte(err.Error()))
@@ -118,15 +140,8 @@ func (e *ConnErrHandler) ServeHTTP(w http.ResponseWriter, req *http.Request, err
 	utils.DefaultHandler.ServeHTTP(w, req, err)
 }
 
+// ConnLimitOption connection limit option type
 type ConnLimitOption func(l *ConnLimiter) error
-
-// Logger sets the logger that will be used by this middleware.
-func Logger(l utils.Logger) ConnLimitOption {
-	return func(cl *ConnLimiter) error {
-		cl.log = l
-		return nil
-	}
-}
 
 // ErrorHandler sets error handler of the server
 func ErrorHandler(h utils.ErrorHandler) ConnLimitOption {
@@ -135,5 +150,3 @@ func ErrorHandler(h utils.ErrorHandler) ConnLimitOption {
 		return nil
 	}
 }
-
-var defaultErrHandler = &ConnErrHandler{}
